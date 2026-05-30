@@ -30,15 +30,18 @@ function rotatePool() {
   console.log(`[DB] Rotated to DB #${currentPoolIndex + 1}`);
 }
 
-async function query(sql, params = [], retries = pools.length) {
+async function query(sql, params = [], retries = Math.max(pools.length, 3)) {
   for (let i = 0; i < retries; i++) {
     try {
       const pool = getPool();
       const result = await pool.query(sql, params);
       return result;
     } catch (err) {
-      console.error(`[DB] Query failed on DB #${currentPoolIndex + 1}:`, err.message);
-      rotatePool();
+      console.error(`[DB] Query failed (attempt ${i+1}/${retries}):`, err.message, err.code || '');
+      if (i < retries - 1) {
+        rotatePool();
+        await new Promise(res => setTimeout(res, 1000));
+      }
     }
   }
   throw new Error('All Neon DBs failed');
