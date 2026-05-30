@@ -87,7 +87,6 @@ export async function initDB() {
     )
   `);
 
-  // ===== TOKEN USAGE TABLE =====
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
       id SERIAL PRIMARY KEY,
@@ -99,7 +98,6 @@ export async function initDB() {
     )
   `);
 
-  // UNIQUE constraint ካልተጨመረ ያክላል (bot restart ቢሆን error አይሰጥም)
   await query(`
     DO $$ BEGIN
       IF NOT EXISTS (
@@ -110,7 +108,21 @@ export async function initDB() {
     END $$;
   `).catch(() => {});
 
-  // nvidia-deepseek እና groq services ይጨምራል
+  // ── አዲስ — board_snapshots ──
+  // አንተ board ስትልክ ሁሉ DeepSeek parse አርጎ እዚህ ይቀምጣል
+  // code ቀጥታ አይነካውም — DeepSeek ብቻ ነው የሚጽፈው
+  await query(`
+    CREATE TABLE IF NOT EXISTS board_snapshots (
+      id SERIAL PRIMARY KEY,
+      slots JSONB NOT NULL DEFAULT '{}',
+      raw_text TEXT,
+      context TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  // Default rows
   await query(`
     INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
     VALUES ('nvidia-deepseek', 0, 0, 0), ('groq', 0, 0, 0)
@@ -127,6 +139,8 @@ export async function initDB() {
     userPatterns: {},
     rules: [],
     intents: [],
+    boardRules: {},
+    boardPatterns: [],
     writingStyle: { amharic: [], tone: '', commonPhrases: [] },
     lastUpdated: null,
   };
@@ -267,6 +281,48 @@ export async function getTokenUsage() {
 
 export async function resetTokenUsage() {
   await query(`UPDATE token_usage SET input_tokens=0, output_tokens=0, calls=0, updated_at=NOW()`);
+}
+
+// ===== BOARD SNAPSHOTS =====
+// DeepSeek ብቻ ነው የሚጽፈው — code ቀጥታ አይነካም
+
+export async function getBoardState() {
+  const res = await query(`
+    SELECT * FROM board_snapshots ORDER BY updated_at DESC LIMIT 1
+  `);
+  if (!res.rows[0]) return null;
+  return {
+    slots: res.rows[0].slots || {},
+    rawText: res.rows[0].raw_text,
+    context: res.rows[0].context,
+    updatedAt: res.rows[0].updated_at,
+  };
+}
+
+export async function updateBoardState(parsed) {
+  const existing = await query(`SELECT id FROM board_snapshots LIMIT 1`);
+
+  if (existing.rows.length > 0) {
+    await query(`
+      UPDATE board_snapshots
+      SET slots = $1, raw_text = $2, context = $3, updated_at = NOW()
+      WHERE id = $4
+    `, [
+      JSON.stringify(parsed.slots || {}),
+      parsed.raw || null,
+      parsed.context || null,
+      existing.rows[0].id,
+    ]);
+  } else {
+    await query(`
+      INSERT INTO board_snapshots (slots, raw_text, context)
+      VALUES ($1, $2, $3)
+    `, [
+      JSON.stringify(parsed.slots || {}),
+      parsed.raw || null,
+      parsed.context || null,
+    ]);
+  }
 }
 
 export { query };
