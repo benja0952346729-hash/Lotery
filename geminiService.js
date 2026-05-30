@@ -7,7 +7,7 @@ async function callGemini(prompt, retries = 3) {
     try {
       const key = getNextGeminiKey();
       const genAI = new GoogleGenerativeAI(key);
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
       const result = await model.generateContent(prompt);
       return result.response.text();
     } catch (err) {
