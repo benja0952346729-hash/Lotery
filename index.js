@@ -1,9 +1,14 @@
 import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 import cron from 'node-cron';
-import { handleGroupMessage, pendingResponses } from './handlers/groupHandler.js';
-import { handleAdminCommand, isAdmin, alertAdmin } from './handlers/adminHandler.js';
-import { generateLearningSummary } from './services/geminiService.js';
+import {
+  handleGroupMessage,
+  handleAdminCommand,
+  isAdmin,
+  alertAdmin,
+  pendingResponses,
+} from './core.js';
+import { generateLearningSummary } from './geminiService.js';
 
 // ===== VALIDATE ENV =====
 const required = ['TELEGRAM_BOT_TOKEN', 'ADMIN_CHAT_ID', 'GROUP_CHAT_ID'];
@@ -14,25 +19,21 @@ for (const key of required) {
   }
 }
 
-// ===== INIT BOT =====
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const ADMIN_ID = parseInt(process.env.ADMIN_CHAT_ID);
 const GROUP_ID = process.env.GROUP_CHAT_ID;
 
 console.log('🤖 Lottery Bot starting...');
 
-// ===== MESSAGE HANDLER =====
 bot.on('message', async (msg) => {
   try {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
     const text = msg.text || '';
 
-    // Private chat - admin commands
     if (msg.chat.type === 'private') {
       if (isAdmin(userId)) {
 
-        // Handle approve/reject for pending responses
         if (text.startsWith('/approve_')) {
           const pendingId = text.replace('/approve_', '');
           const pending = pendingResponses.get(pendingId);
@@ -62,7 +63,6 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // Group chat messages
     if (String(chatId) === String(GROUP_ID) || msg.chat.type === 'supergroup') {
       await handleGroupMessage(bot, msg);
     }
@@ -73,9 +73,8 @@ bot.on('message', async (msg) => {
   }
 });
 
-// ===== DAILY SUMMARY (every day at 9 PM) =====
+// Daily summary at 9 PM
 cron.schedule('0 21 * * *', async () => {
-  console.log('[CRON] Generating daily summary...');
   try {
     const summary = await generateLearningSummary();
     if (summary) {
@@ -92,18 +91,16 @@ cron.schedule('0 21 * * *', async () => {
   }
 });
 
-// ===== STARTUP =====
 bot.getMe().then(async (me) => {
   console.log(`✅ Bot started: @${me.username}`);
-  await alertAdmin(bot, `✅ Bot started successfully!\n@${me.username} is online.\n\nType /status for info`, 'SUCCESS');
+  await alertAdmin(bot, `✅ Bot started!\n@${me.username} is online.\n\nType /status`, 'SUCCESS');
 }).catch(err => {
   console.error('❌ Bot failed to start:', err.message);
   process.exit(1);
 });
 
-// Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('\n🛑 Bot shutting down...');
-  await alertAdmin(bot, '🛑 Bot is shutting down...', 'WARNING').catch(() => {});
+  console.log('\n🛑 Shutting down...');
+  await alertAdmin(bot, '🛑 Bot shutting down...', 'WARNING').catch(() => {});
   process.exit(0);
 });
