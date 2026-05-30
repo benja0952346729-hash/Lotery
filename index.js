@@ -3,29 +3,306 @@ import express from 'express';
 import TelegramBot from 'node-telegram-bot-api';
 import cron from 'node-cron';
 import {
-  handleGroupMessage,
-  handleAdminCommand,
-  isAdmin,
-  alertAdmin,
-  pendingResponses,
-} from './core.js';
-import { generateLearningSummary, learningEvents } from './geminiService.js';
-import { readKnowledge } from './database.js';
+  readKnowledge, updateKnowledge, saveHistory, getHistory,
+  registerMember, getLotteryList, getBotState, setBotState,
+  initDB, query,
+} from './database.js';
+import { learnFromMessage, learnLotteryRules, generateLearningSummary, learningEvents } from './aiService.js';
+import { generateResponse, handleRegistration, generateAnnouncement } from './aiService.js';
 
-// ===== VALIDATE ENV =====
-const required = ['TELEGRAM_BOT_TOKEN', 'ADMIN_CHAT_ID', 'GROUP_CHAT_ID'];
-for (const key of required) {
-  if (!process.env[key]) {
-    console.error(`❌ Missing required env var: ${key}`);
-    process.exit(1);
+// ============================================================
+// 🔑 KEY ROTATION
+// ============================================================
+
+function loadKeys(prefix) {
+  const keys = [];
+  let i = 1;
+  while (process.env[`${prefix}_${i}`] && i <= 50) {
+    keys.push(process.env[`${prefix}_${i}`]);
+    i++;
+  }
+  return keys;
+}
+
+const DEEPSEEK_KEYS = loadKeys('DEEPSEEK_KEY');
+const GROQ_KEYS = loadKeys('GROQ_KEY');
+let deepseekIndex = 0;
+let groqIndex = 0;
+
+export function getNextDeepSeekKey() {
+  if (DEEPSEEK_KEYS.length === 0) throw new Error('No DeepSeek API keys found in .env');
+  const key = DEEPSEEK_KEYS[deepseekIndex];
+  deepseekIndex = (deepseekIndex + 1) % DEEPSEEK_KEYS.length;
+  return key;
+}
+
+export function getNextGroqKey() {
+  if (GROQ_KEYS.length === 0) throw new Error('No Groq API keys found in .env');
+  const key = GROQ_KEYS[groqIndex];
+  groqIndex = (groqIndex + 1) % GROQ_KEYS.length;
+  return key;
+}
+
+export function rotateDeepSeekKey() {
+  deepseekIndex = (deepseekIndex + 1) % DEEPSEEK_KEYS.length;
+  return DEEPSEEK_KEYS[deepseekIndex];
+}
+
+export function rotateGroqKey() {
+  groqIndex = (groqIndex + 1) % GROQ_KEYS.length;
+  return GROQ_KEYS[groqIndex];
+}
+
+export function getKeyStats() {
+  return {
+    deepseek: { total: DEEPSEEK_KEYS.length, currentIndex: deepseekIndex },
+    groq: { total: GROQ_KEYS.length, currentIndex: groqIndex },
+  };
+}
+
+// ============================================================
+// 👑 ADMIN HANDLER
+// ============================================================
+
+const ADMIN_ID = parseInt(process.env.ADMIN_CHAT_ID);
+
+export function isAdmin(userId) {
+  return userId === ADMIN_ID;
+}
+
+export async function alertAdmin(bot, message, level = 'INFO') {
+  const emoji = { INFO: 'ℹ️', WARNING: '⚠️', ERROR: '🚨', SUCCESS: '✅' }[level] || 'ℹ️';
+  try {
+    await bot.sendMessage(ADMIN_ID, `${emoji} ${message}`, { parse_mode: 'Markdown' });
+  } catch (err) {
+    console.error('[ALERT] Failed:', err.message);
   }
 }
 
-// ===== EXPRESS SERVER =====
+export async function handleAdminCommand(bot, msg) {
+  const text = msg.text || '';
+  const chatId = msg.chat.id;
+
+  if (text === '/on') {
+    await setBotState(true, ADMIN_ID);
+    await bot.sendMessage(chatId, '✅ Bot is now ON\nGroq ይናገራል + DeepSeek ይማራል');
+    return;
+  }
+
+  if (text === '/off') {
+    await setBotState(false, ADMIN_ID);
+    await bot.sendMessage(chatId, '❌ Bot is now OFF\nDeepSeek ብቻ ይማራል (silent mode)');
+    return;
+  }
+
+  if (text === '/status') {
+    const isOn = await getBotState();
+    const keyStats = getKeyStats();
+    const knowledge = await readKnowledge();
+    const lotteryList = await getLotteryList();
+    const status = `
+📊 *BOT STATUS*
+━━━━━━━━━━━━━━
+🔛 State: ${isOn ? '✅ ON' : '❌ OFF'}
+🧠 Knowledge:
+  • Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
+  • Rules learned: ${knowledge.rules?.length || 0}
+  • Intents: ${knowledge.intents?.length || 0}
+🎰 Lottery:
+  • Registered: ${lotteryList.length}/100
+🔑 Keys:
+  • DeepSeek: ${keyStats.deepseek.total} keys
+  • Groq: ${keyStats.groq.total} keys
+    `;
+    await bot.sendMessage(chatId, status, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  if (text === '/summary') {
+    await bot.sendMessage(chatId, '⏳ DeepSeek summary እየሰራ ነው...');
+    const summary = await generateLearningSummary();
+    if (summary) {
+      await bot.sendMessage(chatId, `
+📚 *LEARNING SUMMARY*
+━━━━━━━━━━━━━━
+${summary.summary}
+
+✅ New things learned:
+${summary.newThingsLearned?.map(t => `• ${t}`).join('\n')}
+
+⚠️ Weak areas:
+${summary.weakAreas?.map(a => `• ${a}`).join('\n')}
+
+💪 Confidence: ${Math.round((summary.confidence || 0) * 100)}%
+🎯 Ready to replace: ${summary.readyToReplace ? 'YES ✅' : 'Not yet ❌'}
+      `, { parse_mode: 'Markdown' });
+    }
+    return;
+  }
+
+  if (text === '/list') {
+    const list = await getLotteryList();
+    if (list.length === 0) {
+      await bot.sendMessage(chatId, '📋 ምንም ሰው አልተመዘገበም');
+      return;
+    }
+    const listText = list.map(r => `${r.number}. @${r.username || r.user_id}`).join('\n');
+    await bot.sendMessage(chatId, `📋 *LOTTERY LIST*\n━━━━━━━━\n${listText}`, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  if (text.startsWith('/announce ')) {
+    const topic = text.replace('/announce ', '');
+    await bot.sendMessage(chatId, '⏳ Groq announcement እየሰራ ነው...');
+    const announcement = await generateAnnouncement(topic, '');
+    await bot.sendMessage(process.env.GROUP_CHAT_ID, announcement);
+    await bot.sendMessage(chatId, '✅ Announcement ተላከ:\n\n' + announcement);
+    return;
+  }
+
+  if (text === '/knowledge') {
+    const knowledge = await readKnowledge();
+    await bot.sendMessage(chatId, `
+🧠 *KNOWLEDGE BASE*
+━━━━━━━━━━━━━━
+Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
+Rules: ${knowledge.rules?.length || 0}
+Intents: ${knowledge.intents?.length || 0}
+Amharic phrases: ${knowledge.writingStyle?.amharic?.length || 0}
+Last updated: ${knowledge.lastUpdated || 'Never'}
+
+Top rules:
+${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'None yet'}
+    `, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  if (text === '/history') {
+    const history = await getHistory(10);
+    await bot.sendMessage(chatId, `📜 Last 10 days: ${history.length} messages saved in DB`);
+    return;
+  }
+
+  await bot.sendMessage(chatId, `
+🤖 *ADMIN COMMANDS*
+━━━━━━━━━━━━━━
+/on - Bot ያብራ
+/off - Bot ያጥፋ
+/status - Bot status
+/summary - Learning summary
+/list - Lottery list
+/knowledge - Knowledge base
+/history - History stats
+/announce <text> - Announcement
+  `, { parse_mode: 'Markdown' });
+}
+
+// ============================================================
+// 👥 GROUP HANDLER
+// ============================================================
+
+const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
+export const pendingResponses = new Map();
+
+export async function handleGroupMessage(bot, msg) {
+  const text = msg.text || '';
+  const userId = msg.from?.id;
+  const username = msg.from?.username || msg.from?.first_name || 'User';
+  const chatId = msg.chat.id;
+  const isAdminMessage = userId === ADMIN_ID;
+
+  msg._isAdmin = isAdminMessage;
+
+  await saveHistory(msg);
+
+  learnFromMessage(msg, isAdminMessage).catch(err =>
+    console.error('[LEARN] Error:', err.message)
+  );
+
+  if (isAdminMessage) {
+    learnLotteryRules(text).catch(err =>
+      console.error('[RULES] Error:', err.message)
+    );
+    return;
+  }
+
+  const isOn = await getBotState();
+  if (!isOn) return;
+
+  const registrationMatch = text.match(/(\d+)/);
+  const isRegistrationRequest =
+    text.includes('ምዝገባ') ||
+    text.includes('register') ||
+    text.includes('መዝገብ') ||
+    text.includes('እፈልጋለሁ') ||
+    (registrationMatch && text.length < 50);
+
+  if (isRegistrationRequest && registrationMatch) {
+    const requestedNumber = parseInt(registrationMatch[1]);
+    if (requestedNumber >= 1 && requestedNumber <= 100) {
+      await handleLotteryRegistration(bot, msg, userId, username, requestedNumber, chatId);
+      return;
+    }
+  }
+
+  try {
+    const result = await generateResponse(text, userId, username);
+
+    if (result.confidence >= CONFIDENCE_THRESHOLD) {
+      await bot.sendMessage(chatId, result.response, {
+        reply_to_message_id: msg.message_id,
+      });
+    } else {
+      const pendingId = `${userId}_${Date.now()}`;
+      pendingResponses.set(pendingId, {
+        chatId,
+        messageId: msg.message_id,
+        response: result.response,
+        userId,
+        username,
+        originalText: text,
+      });
+      await alertAdmin(
+        bot,
+        `⚠️ *Low confidence* (${Math.round(result.confidence * 100)}%)\n\n` +
+        `@${username}: "${text}"\n\nBot: "${result.response}"\n\n` +
+        `/approve_${pendingId} ✅ | /reject_${pendingId} ❌`,
+        'WARNING'
+      );
+    }
+  } catch (err) {
+    console.error('[GROUP] Error:', err.message);
+    await alertAdmin(bot, `🚨 Error: ${err.message}`, 'ERROR');
+  }
+}
+
+async function handleLotteryRegistration(bot, msg, userId, username, requestedNumber, chatId) {
+  try {
+    const result = await handleRegistration(userId, username, requestedNumber);
+    if (result.available) {
+      const regResult = await registerMember(userId, username, requestedNumber);
+      if (regResult.success) {
+        await bot.sendMessage(chatId, result.response, { reply_to_message_id: msg.message_id });
+        await alertAdmin(bot, `✅ @${username} → number ${requestedNumber}`, 'INFO');
+      }
+    } else {
+      await bot.sendMessage(chatId, result.response, { reply_to_message_id: msg.message_id });
+    }
+  } catch (err) {
+    console.error('[REGISTRATION] Error:', err.message);
+  }
+}
+
+// Init DB
+await initDB();
+
+// ============================================================
+// 🌐 EXPRESS SERVER
+// ============================================================
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Simple home page — no html file needed
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -39,20 +316,17 @@ app.get('/', (req, res) => {
   body { background:#0a0a0f; color:#e2e8f0; font-family:'Courier New',monospace; padding:20px; }
   h1 { color:#00ff9d; font-size:18px; margin-bottom:6px; letter-spacing:2px; }
   p.sub { color:#4a5568; font-size:12px; margin-bottom:24px; }
-
   .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:24px; }
   .stat { background:#11111a; border:1px solid #1e1e2e; border-radius:10px; padding:16px; }
   .stat-label { font-size:10px; color:#4a5568; text-transform:uppercase; letter-spacing:2px; margin-bottom:6px; }
   .stat-value { font-size:32px; font-weight:700; color:#00ff9d; }
   .stat-sub { font-size:11px; color:#4a5568; margin-top:2px; }
-
   .confidence { background:#11111a; border:1px solid #1e1e2e; border-radius:10px; padding:16px; margin-bottom:24px; }
   .conf-label { font-size:10px; color:#4a5568; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px; }
   .conf-bar { height:8px; background:#1e1e2e; border-radius:4px; overflow:hidden; }
   .conf-fill { height:100%; border-radius:4px; background:linear-gradient(90deg,#00ff9d,#7c3aed); transition:width 1s ease; }
   .conf-pct { font-size:28px; font-weight:700; color:#00ff9d; margin-top:6px; }
   .ready { font-size:13px; margin-top:8px; }
-
   .log-box { background:#070710; border:1px solid #1e1e2e; border-radius:10px; padding:16px; height:320px; overflow-y:auto; }
   .log-title { font-size:10px; color:#00ff9d; text-transform:uppercase; letter-spacing:2px; margin-bottom:12px; }
   .log-entry { font-size:12px; line-height:1.9; display:flex; gap:10px; }
@@ -136,7 +410,6 @@ app.get('/', (req, res) => {
     } catch(e) { addLog('error', 'Stats fetch failed'); }
   }
 
-  // SSE live events
   const es = new EventSource('/events');
   es.onmessage = e => {
     const d = JSON.parse(e.data);
@@ -153,12 +426,10 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// Learning status API
 app.get('/learn-status', async (req, res) => {
   try {
     const knowledge = await readKnowledge();
@@ -176,7 +447,6 @@ app.get('/learn-status', async (req, res) => {
   }
 });
 
-// Real-time SSE events
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -202,9 +472,11 @@ app.listen(PORT, () => {
   console.log(`🌐 Web server running on port ${PORT}`);
 });
 
-// ===== BOT =====
+// ============================================================
+// 🤖 TELEGRAM BOT
+// ============================================================
+
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
-const ADMIN_ID = parseInt(process.env.ADMIN_CHAT_ID);
 const GROUP_ID = process.env.GROUP_CHAT_ID;
 
 console.log('🤖 Lottery Bot starting...');
@@ -256,7 +528,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Daily summary at 9 PM
+// Daily summary — 9 PM
 cron.schedule('0 21 * * *', async () => {
   try {
     const summary = await generateLearningSummary();
