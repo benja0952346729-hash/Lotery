@@ -98,14 +98,9 @@ export async function initDB() {
     )
   `);
 
+  // UNIQUE constraint — safely ignored if already exists
   await query(`
-    DO $$ BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'token_usage_service_unique'
-      ) THEN
-        ALTER TABLE token_usage ADD CONSTRAINT token_usage_service_unique UNIQUE (service);
-      END IF;
-    END $$;
+    ALTER TABLE token_usage ADD CONSTRAINT token_usage_service_unique UNIQUE (service)
   `).catch(() => {});
 
   // ── አዲስ — board_snapshots ──
