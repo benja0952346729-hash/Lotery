@@ -9,11 +9,12 @@ import {
 } from './database.js';
 import { learnFromMessage, learnLotteryRules, generateLearningSummary, learningEvents, getTokenStats } from './aiService.js';
 import { generateResponse, handleRegistration, generateAnnouncement } from './aiService.js';
+import { getKeyStats } from './keys.js';
 
 // ============================================================
 // 🔑 KEY ROTATION
 // ============================================================
-export { getNextDeepSeekKey, rotateDeepSeekKey, getNextGroqKey, rotateGroqKey, getKeyStats } from './keys.js';
+export { getNextDeepSeekKey, rotateDeepSeekKey, getNextGroqKey, rotateGroqKey } from './keys.js';
 
 // ============================================================
 // 👑 ADMIN HANDLER
