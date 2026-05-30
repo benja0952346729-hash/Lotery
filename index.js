@@ -159,6 +159,7 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
   }
 
 
+  if (text === '/history') {
     const history = await getHistory(10);
     await bot.sendMessage(chatId, `📜 Last 10 days: ${history.length} messages saved in DB`);
     return;
