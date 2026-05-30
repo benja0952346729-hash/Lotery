@@ -1,6 +1,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { EventEmitter } from 'events';
 import { getNextGeminiKey, rotateGeminiKey } from './core.js';
 import { readKnowledge, updateKnowledge, getHistory } from './database.js';
+
+export const learningEvents = new EventEmitter();
 
 async function callGemini(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -14,6 +17,7 @@ async function callGemini(prompt, retries = 3) {
       if (err.status === 429 || err.message?.includes('quota')) {
         console.log('[GEMINI] Rate limit, rotating key...');
         rotateGeminiKey();
+        await new Promise(res => setTimeout(res, 2000));
         continue;
       }
       throw err;
@@ -62,9 +66,17 @@ Return ONLY valid JSON (no markdown):
     if (parsed.shouldUpdate) {
       await updateKnowledge(parsed);
     }
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `አዲስ message ተማረ — ${isAdmin ? 'ADMIN' : 'USER'}: "${message.text?.slice(0, 40)}"`
+    });
     return parsed;
   } catch (err) {
     console.error('[GEMINI] Learn error:', err.message);
+    learningEvents.emit('activity', {
+      type: 'error',
+      msg: `Learn error: ${err.message}`
+    });
     return null;
   }
 }
@@ -99,9 +111,17 @@ Return ONLY valid JSON:
     if (evaluation.shouldLearn && evaluation.intentUpdate) {
       await updateKnowledge({ intents: [evaluation.intentUpdate] });
     }
+    learningEvents.emit('activity', {
+      type: 'eval',
+      msg: `Response ተገምግሟል — score: ${Math.round((evaluation.score || 0) * 100)}% ${evaluation.isCorrect ? '✅' : '⚠️'}`
+    });
     return evaluation;
   } catch (err) {
     console.error('[GEMINI] Evaluate error:', err.message);
+    learningEvents.emit('activity', {
+      type: 'error',
+      msg: `Evaluate error: ${err.message}`
+    });
     return { score: 0.5, isCorrect: true, issues: [] };
   }
 }
@@ -125,10 +145,18 @@ Return ONLY valid JSON:
     const parsed = JSON.parse(clean);
     if (parsed.isRule && parsed.rules.length > 0) {
       await updateKnowledge({ rules: parsed.rules });
+      learningEvents.emit('activity', {
+        type: 'rule',
+        msg: `ህግ ተወሰደ: "${parsed.rules[0]?.slice(0, 50)}"`
+      });
     }
     return parsed;
   } catch (err) {
     console.error('[GEMINI] Rule error:', err.message);
+    learningEvents.emit('activity', {
+      type: 'error',
+      msg: `Rule error: ${err.message}`
+    });
     return null;
   }
 }
@@ -155,9 +183,18 @@ Return ONLY valid JSON:
   try {
     const response = await callGemini(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
+    const parsed = JSON.parse(clean);
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `Daily summary ተሰራ — confidence: ${Math.round((parsed.confidence || 0) * 100)}%`
+    });
+    return parsed;
   } catch (err) {
     console.error('[GEMINI] Summary error:', err.message);
+    learningEvents.emit('activity', {
+      type: 'error',
+      msg: `Summary error: ${err.message}`
+    });
     return null;
   }
 }
