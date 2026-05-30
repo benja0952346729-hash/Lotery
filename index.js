@@ -7,58 +7,13 @@ import {
   registerMember, getLotteryList, getBotState, setBotState,
   initDB, query,
 } from './database.js';
-import { learnFromMessage, learnLotteryRules, generateLearningSummary, learningEvents } from './aiService.js';
+import { learnFromMessage, learnLotteryRules, generateLearningSummary, learningEvents, getTokenStats } from './aiService.js';
 import { generateResponse, handleRegistration, generateAnnouncement } from './aiService.js';
 
 // ============================================================
 // 🔑 KEY ROTATION
 // ============================================================
-
-function loadKeys(prefix) {
-  const keys = [];
-  let i = 1;
-  while (process.env[`${prefix}_${i}`] && i <= 50) {
-    keys.push(process.env[`${prefix}_${i}`]);
-    i++;
-  }
-  return keys;
-}
-
-const DEEPSEEK_KEYS = loadKeys('DEEPSEEK_KEY');
-const GROQ_KEYS = loadKeys('GROQ_KEY');
-let deepseekIndex = 0;
-let groqIndex = 0;
-
-export function getNextDeepSeekKey() {
-  if (DEEPSEEK_KEYS.length === 0) throw new Error('No DeepSeek API keys found in .env');
-  const key = DEEPSEEK_KEYS[deepseekIndex];
-  deepseekIndex = (deepseekIndex + 1) % DEEPSEEK_KEYS.length;
-  return key;
-}
-
-export function getNextGroqKey() {
-  if (GROQ_KEYS.length === 0) throw new Error('No Groq API keys found in .env');
-  const key = GROQ_KEYS[groqIndex];
-  groqIndex = (groqIndex + 1) % GROQ_KEYS.length;
-  return key;
-}
-
-export function rotateDeepSeekKey() {
-  deepseekIndex = (deepseekIndex + 1) % DEEPSEEK_KEYS.length;
-  return DEEPSEEK_KEYS[deepseekIndex];
-}
-
-export function rotateGroqKey() {
-  groqIndex = (groqIndex + 1) % GROQ_KEYS.length;
-  return GROQ_KEYS[groqIndex];
-}
-
-export function getKeyStats() {
-  return {
-    deepseek: { total: DEEPSEEK_KEYS.length, currentIndex: deepseekIndex },
-    groq: { total: GROQ_KEYS.length, currentIndex: groqIndex },
-  };
-}
+export { getNextDeepSeekKey, rotateDeepSeekKey, getNextGroqKey, rotateGroqKey, getKeyStats } from './keys.js';
 
 // ============================================================
 // 👑 ADMIN HANDLER
@@ -177,7 +132,33 @@ ${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No
     return;
   }
 
-  if (text === '/history') {
+  if (text === '/tokens') {
+    const t = await getTokenStats();
+    const ds = t.deepseek || { calls:0, input:0, output:0, total:0 };
+    const gr = t.groq     || { calls:0, input:0, output:0, total:0 };
+    await bot.sendMessage(chatId, `
+🔢 *TOKEN USAGE*
+━━━━━━━━━━━━━━
+🧠 *DeepSeek*
+  • Calls: ${ds.calls.toLocaleString()}
+  • Input:  ${ds.input.toLocaleString()} tokens
+  • Output: ${ds.output.toLocaleString()} tokens
+  • Total:  ${ds.total.toLocaleString()} tokens
+
+⚡ *Groq*
+  • Calls: ${gr.calls.toLocaleString()}
+  • Input:  ${gr.input.toLocaleString()} tokens
+  • Output: ${gr.output.toLocaleString()} tokens
+  • Total:  ${gr.total.toLocaleString()} tokens
+
+📊 *Grand Total: ${(ds.total + gr.total).toLocaleString()} tokens*
+━━━━━━━━━━━━━━
+_Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
+    `, { parse_mode: 'Markdown' });
+    return;
+  }
+
+
     const history = await getHistory(10);
     await bot.sendMessage(chatId, `📜 Last 10 days: ${history.length} messages saved in DB`);
     return;
@@ -193,6 +174,8 @@ ${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No
 /list - Lottery list
 /knowledge - Knowledge base
 /history - History stats
+/tokens - Token usage
+/resettokens - Token reset
 /announce <text> - Announcement
   `, { parse_mode: 'Markdown' });
 }
