@@ -1,31 +1,78 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import OpenAI from 'openai'; // DeepSeek uses OpenAI-compatible SDK
+import Groq from 'groq-sdk';
 import { EventEmitter } from 'events';
-import { getNextGeminiKey, rotateGeminiKey } from './core.js';
-import { readKnowledge, updateKnowledge, getHistory } from './database.js';
+import { getNextGroqKey, rotateGroqKey, getNextDeepSeekKey, rotateDeepSeekKey } from './core.js';
+import { readKnowledge, updateKnowledge, getHistory, getLotteryList } from './database.js';
 
+// ─────────────────────────────────────────
+// EVENTS
+// ─────────────────────────────────────────
 export const learningEvents = new EventEmitter();
 
-async function callGemini(prompt, retries = 3) {
+const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
+const BOT_NAME = process.env.BOT_NAME || 'Admin';
+
+// ─────────────────────────────────────────
+// DEEPSEEK CALLER (replaces Gemini)
+// ─────────────────────────────────────────
+async function callDeepSeek(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
-      const key = getNextGeminiKey();
-      const genAI = new GoogleGenerativeAI(key);
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-      const result = await model.generateContent(prompt);
-      return result.response.text();
+      const key = getNextDeepSeekKey();
+      const client = new OpenAI({
+        apiKey: key,
+        baseURL: 'https://api.deepseek.com',
+      });
+      const completion = await client.chat.completions.create({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 1000,
+        temperature: 0.7,
+      });
+      return completion.choices[0]?.message?.content || '';
     } catch (err) {
-      if (err.status === 429 || err.message?.includes('quota')) {
-        console.log('[GEMINI] Rate limit, rotating key...');
-        rotateGeminiKey();
+      if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
+        console.log('[DEEPSEEK] Rate limit, rotating key...');
+        rotateDeepSeekKey();
         await new Promise(res => setTimeout(res, 2000));
         continue;
       }
       throw err;
     }
   }
-  throw new Error('All Gemini keys exhausted');
+  throw new Error('All DeepSeek keys exhausted');
 }
 
+// ─────────────────────────────────────────
+// GROQ CALLER
+// ─────────────────────────────────────────
+async function callGroq(messages, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const key = getNextGroqKey();
+      const groq = new Groq({ apiKey: key });
+      const completion = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages,
+        max_tokens: 500,
+        temperature: 0.7,
+      });
+      return completion.choices[0]?.message?.content || '';
+    } catch (err) {
+      if (err.status === 429 || err.message?.includes('rate limit')) {
+        console.log('[GROQ] Rate limit, rotating key...');
+        rotateGroqKey();
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('All Groq keys exhausted');
+}
+
+// ─────────────────────────────────────────
+// LEARNING — learnFromMessage
+// ─────────────────────────────────────────
 export async function learnFromMessage(message, isAdmin = false) {
   const knowledge = await readKnowledge();
 
@@ -60,7 +107,7 @@ Return ONLY valid JSON (no markdown):
 }`;
 
   try {
-    const response = await callGemini(prompt);
+    const response = await callDeepSeek(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     if (parsed.shouldUpdate) {
@@ -72,7 +119,7 @@ Return ONLY valid JSON (no markdown):
     });
     return parsed;
   } catch (err) {
-    console.error('[GEMINI] Learn error:', err.message);
+    console.error('[DEEPSEEK] Learn error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Learn error: ${err.message}`
@@ -81,6 +128,9 @@ Return ONLY valid JSON (no markdown):
   }
 }
 
+// ─────────────────────────────────────────
+// EVALUATION — evaluateGroqResponse
+// ─────────────────────────────────────────
 export async function evaluateGroqResponse(userMessage, groqResponse) {
   const knowledge = await readKnowledge();
 
@@ -105,7 +155,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callGemini(prompt);
+    const response = await callDeepSeek(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const evaluation = JSON.parse(clean);
     if (evaluation.shouldLearn && evaluation.intentUpdate) {
@@ -117,7 +167,7 @@ Return ONLY valid JSON:
     });
     return evaluation;
   } catch (err) {
-    console.error('[GEMINI] Evaluate error:', err.message);
+    console.error('[DEEPSEEK] Evaluate error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Evaluate error: ${err.message}`
@@ -126,6 +176,9 @@ Return ONLY valid JSON:
   }
 }
 
+// ─────────────────────────────────────────
+// LOTTERY RULES — learnLotteryRules
+// ─────────────────────────────────────────
 export async function learnLotteryRules(adminMessage) {
   const prompt = `
 Extract lottery rules from this admin message: "${adminMessage}"
@@ -140,7 +193,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callGemini(prompt);
+    const response = await callDeepSeek(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     if (parsed.isRule && parsed.rules.length > 0) {
@@ -152,7 +205,7 @@ Return ONLY valid JSON:
     }
     return parsed;
   } catch (err) {
-    console.error('[GEMINI] Rule error:', err.message);
+    console.error('[DEEPSEEK] Rule error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Rule error: ${err.message}`
@@ -161,6 +214,9 @@ Return ONLY valid JSON:
   }
 }
 
+// ─────────────────────────────────────────
+// SUMMARY — generateLearningSummary
+// ─────────────────────────────────────────
 export async function generateLearningSummary() {
   const knowledge = await readKnowledge();
   const history = await getHistory(10);
@@ -181,7 +237,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callGemini(prompt);
+    const response = await callDeepSeek(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     learningEvents.emit('activity', {
@@ -190,11 +246,110 @@ Return ONLY valid JSON:
     });
     return parsed;
   } catch (err) {
-    console.error('[GEMINI] Summary error:', err.message);
+    console.error('[DEEPSEEK] Summary error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Summary error: ${err.message}`
     });
     return null;
   }
+}
+
+// ─────────────────────────────────────────
+// GROQ — System Prompt Builder
+// ─────────────────────────────────────────
+async function buildSystemPrompt() {
+  const knowledge = await readKnowledge();
+  const lotteryList = await getLotteryList();
+
+  return `You are ${BOT_NAME}, admin of an Amharic Telegram lottery group. Respond EXACTLY like the real admin.
+
+ADMIN STYLE:
+- Phrases: ${knowledge.adminStyle?.responses?.slice(0, 15).join(' | ') || 'friendly'}
+- Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
+- Amharic phrases: ${knowledge.writingStyle?.amharic?.join(', ') || ''}
+
+RULES:
+${knowledge.rules?.map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No rules yet'}
+
+LOTTERY:
+- Slots: 1-100
+- Registered: ${lotteryList.length} people
+
+INTENTS:
+${knowledge.intents?.slice(0, 20).map(i => `- "${i.pattern}" → "${i.betterResponse || i.response}"`).join('\n') || ''}
+
+CRITICAL:
+1. Always respond in Amharic
+2. Be natural, not robotic
+3. Keep responses short like a real admin`;
+}
+
+// ─────────────────────────────────────────
+// GROQ — generateResponse
+// ─────────────────────────────────────────
+export async function generateResponse(userMessage, userId, username) {
+  const systemPrompt = await buildSystemPrompt();
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `${username}: ${userMessage}` },
+  ];
+
+  const response = await callGroq(messages);
+  const evaluation = await evaluateGroqResponse(userMessage, response);
+
+  if (evaluation.suggestion && evaluation.score < 0.8) {
+    await updateKnowledge({
+      intents: [{
+        pattern: userMessage,
+        meaning: 'user question',
+        betterResponse: evaluation.suggestion
+      }]
+    }).catch(err => console.error('[LEARN] Update error:', err.message));
+  }
+
+  return {
+    response,
+    confidence: evaluation.score,
+    needsAdminApproval: evaluation.score < CONFIDENCE_THRESHOLD,
+    evaluation,
+  };
+}
+
+// ─────────────────────────────────────────
+// GROQ — handleRegistration
+// ─────────────────────────────────────────
+export async function handleRegistration(userId, username, requestedNumber) {
+  const systemPrompt = await buildSystemPrompt();
+  const lotteryList = await getLotteryList();
+
+  const numberTaken = lotteryList.find(m => m.number === requestedNumber);
+  const alreadyRegistered = lotteryList.find(m => m.user_id === userId);
+  const validRange = requestedNumber >= 1 && requestedNumber <= 100;
+
+  let situation = '';
+  if (!validRange) situation = `Invalid number ${requestedNumber} (must be 1-100)`;
+  else if (alreadyRegistered) situation = `Already registered with number ${alreadyRegistered.number}`;
+  else if (numberTaken) situation = `Number ${requestedNumber} already taken`;
+  else situation = `Number ${requestedNumber} is available`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Situation: ${situation}. @${username} wants number ${requestedNumber}. Respond as admin in Amharic.` },
+  ];
+
+  const response = await callGroq(messages);
+  return { response, available: !numberTaken && validRange && !alreadyRegistered };
+}
+
+// ─────────────────────────────────────────
+// GROQ — generateAnnouncement
+// ─────────────────────────────────────────
+export async function generateAnnouncement(topic, details) {
+  const systemPrompt = await buildSystemPrompt();
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Write an announcement about: ${topic}. ${details}. Write in admin's Amharic style.` },
+  ];
+  return await callGroq(messages);
 }
