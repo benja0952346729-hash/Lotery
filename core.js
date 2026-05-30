@@ -1,7 +1,10 @@
-import 'dotenv/config';
-import fs from 'fs-extra';
-import { learnFromMessage, learnLotteryRules, generateLearningSummary } from './services/geminiService.js';
-import { generateResponse, handleRegistration, generateAnnouncement } from './services/groqService.js';
+import {
+  readKnowledge, updateKnowledge, saveHistory, getHistory,
+  registerMember, getLotteryList, getBotState, setBotState,
+  initDB, query,
+} from './database.js';
+import { learnFromMessage, learnLotteryRules, generateLearningSummary } from './geminiService.js';
+import { generateResponse, handleRegistration, generateAnnouncement } from './groqService.js';
 
 // ============================================================
 // 🔑 KEY ROTATION
@@ -10,7 +13,7 @@ import { generateResponse, handleRegistration, generateAnnouncement } from './se
 function loadKeys(prefix) {
   const keys = [];
   let i = 1;
-  while (process.env[`${prefix}_${i}`]) {
+  while (process.env[`${prefix}_${i}`] && i <= 50) {
     keys.push(process.env[`${prefix}_${i}`]);
     i++;
   }
@@ -37,13 +40,11 @@ export function getNextGroqKey() {
 }
 
 export function rotateGeminiKey() {
-  console.log(`[KEY] Gemini key ${geminiIndex} hit limit, rotating...`);
   geminiIndex = (geminiIndex + 1) % GEMINI_KEYS.length;
   return GEMINI_KEYS[geminiIndex];
 }
 
 export function rotateGroqKey() {
-  console.log(`[KEY] Groq key ${groqIndex} hit limit, rotating...`);
   groqIndex = (groqIndex + 1) % GROQ_KEYS.length;
   return GROQ_KEYS[groqIndex];
 }
@@ -53,121 +54,6 @@ export function getKeyStats() {
     gemini: { total: GEMINI_KEYS.length, currentIndex: geminiIndex },
     groq: { total: GROQ_KEYS.length, currentIndex: groqIndex },
   };
-}
-
-// ============================================================
-// 💾 DATABASE
-// ============================================================
-
-const DB_DIR = './db/data';
-const FILES = {
-  knowledge: `${DB_DIR}/knowledge.json`,
-  members: `${DB_DIR}/members.json`,
-  history: `${DB_DIR}/history.json`,
-  lottery: `${DB_DIR}/lottery.json`,
-  botState: `${DB_DIR}/bot_state.json`,
-  keyUsage: `${DB_DIR}/key_usage.json`,
-};
-
-await fs.ensureDir(DB_DIR);
-for (const [key, filepath] of Object.entries(FILES)) {
-  if (!await fs.pathExists(filepath)) {
-    const defaults = {
-      knowledge: {
-        adminStyle: { greetings: [], warnings: [], announcements: [], responses: [] },
-        userPatterns: {},
-        rules: [],
-        intents: [],
-        writingStyle: { amharic: [], tone: '', commonPhrases: [] },
-        lastUpdated: null,
-      },
-      members: { registered: {}, waitlist: [] },
-      history: { messages: [] },
-      lottery: {
-        isActive: false,
-        list: {},
-        totalSlots: 100,
-        rules: [],
-      },
-      botState: { isOn: false, lastToggled: null, toggledBy: null },
-      keyUsage: { gemini: {}, groq: {} },
-    };
-    await fs.writeJson(filepath, defaults[key], { spaces: 2 });
-  }
-}
-
-export async function readDB(name) {
-  return await fs.readJson(FILES[name]);
-}
-
-export async function writeDB(name, data) {
-  await fs.writeJson(FILES[name], data, { spaces: 2 });
-}
-
-export async function saveHistory(message) {
-  const db = await readDB('history');
-  const fiveDaysAgo = Date.now() - 5 * 24 * 60 * 60 * 1000;
-  db.messages = db.messages.filter(m => m.timestamp > fiveDaysAgo);
-  db.messages.push({
-    id: message.message_id,
-    from: {
-      id: message.from?.id,
-      username: message.from?.username,
-      firstName: message.from?.first_name,
-    },
-    text: message.text || '',
-    timestamp: Date.now(),
-    date: new Date().toISOString(),
-    isAdmin: message._isAdmin || false,
-  });
-  await writeDB('history', db);
-}
-
-function deepMergeArrays(target, source) {
-  const result = { ...target };
-  for (const key of Object.keys(source)) {
-    if (Array.isArray(source[key]) && Array.isArray(target[key])) {
-      result[key] = [...new Set([...target[key], ...source[key]])];
-    } else if (typeof source[key] === 'object' && source[key] !== null) {
-      result[key] = deepMergeArrays(target[key] || {}, source[key]);
-    } else {
-      result[key] = source[key];
-    }
-  }
-  return result;
-}
-
-export async function updateKnowledge(updates) {
-  const db = await readDB('knowledge');
-  const merged = deepMergeArrays(db, updates);
-  merged.lastUpdated = new Date().toISOString();
-  await writeDB('knowledge', merged);
-  return merged;
-}
-
-export async function registerMember(userId, username, number) {
-  const db = await readDB('lottery');
-  if (db.list[number]) return { success: false, reason: 'number_taken' };
-  if (Object.values(db.list).find(m => m.userId === userId)) {
-    return { success: false, reason: 'already_registered' };
-  }
-  db.list[number] = { userId, username, registeredAt: new Date().toISOString() };
-  await writeDB('lottery', db);
-  return { success: true, number };
-}
-
-export async function getLotteryList() {
-  const db = await readDB('lottery');
-  return db.list;
-}
-
-export async function getBotState() {
-  const db = await readDB('botState');
-  return db.isOn;
-}
-
-export async function setBotState(isOn, adminId) {
-  await writeDB('botState', { isOn, lastToggled: new Date().toISOString(), toggledBy: adminId });
 }
 
 // ============================================================
@@ -183,9 +69,9 @@ export function isAdmin(userId) {
 export async function alertAdmin(bot, message, level = 'INFO') {
   const emoji = { INFO: 'ℹ️', WARNING: '⚠️', ERROR: '🚨', SUCCESS: '✅' }[level] || 'ℹ️';
   try {
-    await bot.sendMessage(ADMIN_ID, `${emoji} ${message}`);
+    await bot.sendMessage(ADMIN_ID, `${emoji} ${message}`, { parse_mode: 'Markdown' });
   } catch (err) {
-    console.error('[ALERT] Failed to send admin alert:', err.message);
+    console.error('[ALERT] Failed:', err.message);
   }
 }
 
@@ -208,22 +94,21 @@ export async function handleAdminCommand(bot, msg) {
   if (text === '/status') {
     const isOn = await getBotState();
     const keyStats = getKeyStats();
-    const knowledge = await readDB('knowledge');
-    const lottery = await readDB('lottery');
+    const knowledge = await readKnowledge();
+    const lotteryList = await getLotteryList();
     const status = `
 📊 *BOT STATUS*
 ━━━━━━━━━━━━━━
 🔛 State: ${isOn ? '✅ ON' : '❌ OFF'}
 🧠 Knowledge:
-  • Admin phrases: ${knowledge.adminStyle.responses.length}
-  • Rules learned: ${knowledge.rules.length}
-  • Intents: ${knowledge.intents.length}
+  • Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
+  • Rules learned: ${knowledge.rules?.length || 0}
+  • Intents: ${knowledge.intents?.length || 0}
 🎰 Lottery:
-  • Registered: ${Object.keys(lottery.list).length}/100
-  • Active: ${lottery.isActive ? 'Yes' : 'No'}
+  • Registered: ${lotteryList.length}/100
 🔑 Keys:
-  • Gemini: ${keyStats.gemini.total} keys (current: #${keyStats.gemini.currentIndex + 1})
-  • Groq: ${keyStats.groq.total} keys (current: #${keyStats.groq.currentIndex + 1})
+  • Gemini: ${keyStats.gemini.total} keys
+  • Groq: ${keyStats.groq.total} keys
     `;
     await bot.sendMessage(chatId, status, { parse_mode: 'Markdown' });
     return;
@@ -233,36 +118,31 @@ export async function handleAdminCommand(bot, msg) {
     await bot.sendMessage(chatId, '⏳ Gemini summary እየሰራ ነው...');
     const summary = await generateLearningSummary();
     if (summary) {
-      const msg2 = `
+      await bot.sendMessage(chatId, `
 📚 *LEARNING SUMMARY*
 ━━━━━━━━━━━━━━
 ${summary.summary}
 
 ✅ New things learned:
-${summary.newThingsLearned.map(t => `• ${t}`).join('\n')}
+${summary.newThingsLearned?.map(t => `• ${t}`).join('\n')}
 
 ⚠️ Weak areas:
-${summary.weakAreas.map(a => `• ${a}`).join('\n')}
+${summary.weakAreas?.map(a => `• ${a}`).join('\n')}
 
-💪 Confidence: ${Math.round(summary.confidence * 100)}%
-🎯 Ready to replace admin: ${summary.readyToReplace ? 'YES ✅' : 'Not yet ❌'}
-      `;
-      await bot.sendMessage(chatId, msg2, { parse_mode: 'Markdown' });
+💪 Confidence: ${Math.round((summary.confidence || 0) * 100)}%
+🎯 Ready to replace: ${summary.readyToReplace ? 'YES ✅' : 'Not yet ❌'}
+      `, { parse_mode: 'Markdown' });
     }
     return;
   }
 
   if (text === '/list') {
-    const lottery = await readDB('lottery');
-    const entries = Object.entries(lottery.list);
-    if (entries.length === 0) {
+    const list = await getLotteryList();
+    if (list.length === 0) {
       await bot.sendMessage(chatId, '📋 ምንም ሰው አልተመዘገበም');
       return;
     }
-    const listText = entries
-      .sort(([a], [b]) => parseInt(a) - parseInt(b))
-      .map(([num, data]) => `${num}. @${data.username || data.userId}`)
-      .join('\n');
+    const listText = list.map(r => `${r.number}. @${r.username || r.user_id}`).join('\n');
     await bot.sendMessage(chatId, `📋 *LOTTERY LIST*\n━━━━━━━━\n${listText}`, { parse_mode: 'Markdown' });
     return;
   }
@@ -277,35 +157,39 @@ ${summary.weakAreas.map(a => `• ${a}`).join('\n')}
   }
 
   if (text === '/knowledge') {
-    const knowledge = await readDB('knowledge');
-    const kb = `
+    const knowledge = await readKnowledge();
+    await bot.sendMessage(chatId, `
 🧠 *KNOWLEDGE BASE*
 ━━━━━━━━━━━━━━
-Admin phrases: ${knowledge.adminStyle.responses.length}
-Greetings: ${knowledge.adminStyle.greetings.length}
-Warnings: ${knowledge.adminStyle.warnings.length}
-Rules: ${knowledge.rules.length}
-Intents: ${knowledge.intents.length}
+Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
+Rules: ${knowledge.rules?.length || 0}
+Intents: ${knowledge.intents?.length || 0}
 Amharic phrases: ${knowledge.writingStyle?.amharic?.length || 0}
 Last updated: ${knowledge.lastUpdated || 'Never'}
 
 Top rules:
-${knowledge.rules.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n')}
-    `;
-    await bot.sendMessage(chatId, kb, { parse_mode: 'Markdown' });
+${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'None yet'}
+    `, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  if (text === '/history') {
+    const history = await getHistory(10);
+    await bot.sendMessage(chatId, `📜 Last 10 days: ${history.length} messages saved in DB`);
     return;
   }
 
   await bot.sendMessage(chatId, `
 🤖 *ADMIN COMMANDS*
 ━━━━━━━━━━━━━━
-/on - Bot ያብራ (Groq + Gemini)
-/off - Bot ያጥፋ (Gemini only)
+/on - Bot ያብራ
+/off - Bot ያጥፋ
 /status - Bot status
 /summary - Learning summary
 /list - Lottery list
 /knowledge - Knowledge base
-/announce <text> - Group announcement
+/history - History stats
+/announce <text> - Announcement
   `, { parse_mode: 'Markdown' });
 }
 
@@ -324,6 +208,8 @@ export async function handleGroupMessage(bot, msg) {
   const isAdminMessage = userId === ADMIN_ID;
 
   msg._isAdmin = isAdminMessage;
+
+  // Save to DB always
   await saveHistory(msg);
 
   // Gemini always learns
@@ -338,12 +224,9 @@ export async function handleGroupMessage(bot, msg) {
     return;
   }
 
-  // Bot OFF → silent learning only
+  // Bot OFF → silent
   const isOn = await getBotState();
-  if (!isOn) {
-    console.log('[BOT] Bot is OFF - silent learning mode');
-    return;
-  }
+  if (!isOn) return;
 
   // Detect registration
   const registrationMatch = text.match(/(\d+)/);
@@ -370,7 +253,6 @@ export async function handleGroupMessage(bot, msg) {
       await bot.sendMessage(chatId, result.response, {
         reply_to_message_id: msg.message_id,
       });
-      console.log(`[BOT] Responded with confidence ${result.confidence}`);
     } else {
       const pendingId = `${userId}_${Date.now()}`;
       pendingResponses.set(pendingId, {
@@ -402,7 +284,7 @@ async function handleLotteryRegistration(bot, msg, userId, username, requestedNu
       const regResult = await registerMember(userId, username, requestedNumber);
       if (regResult.success) {
         await bot.sendMessage(chatId, result.response, { reply_to_message_id: msg.message_id });
-        await alertAdmin(bot, `✅ @${username} registered → number ${requestedNumber}`, 'INFO');
+        await alertAdmin(bot, `✅ @${username} → number ${requestedNumber}`, 'INFO');
       }
     } else {
       await bot.sendMessage(chatId, result.response, { reply_to_message_id: msg.message_id });
@@ -411,3 +293,6 @@ async function handleLotteryRegistration(bot, msg, userId, username, requestedNu
     console.error('[REGISTRATION] Error:', err.message);
   }
 }
+
+// Init DB on startup
+await initDB();
