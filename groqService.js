@@ -1,6 +1,6 @@
 import Groq from 'groq-sdk';
 import { getNextGroqKey, rotateGroqKey } from './core.js';
-import { readKnowledge, getLotteryList } from './database.js';
+import { readKnowledge, getLotteryList, updateKnowledge } from './database.js';
 import { evaluateGroqResponse } from './geminiService.js';
 
 const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
@@ -66,6 +66,17 @@ export async function generateResponse(userMessage, userId, username) {
 
   const response = await callGroq(messages);
   const evaluation = await evaluateGroqResponse(userMessage, response);
+
+  // ✅ Better response ካለ knowledge ውስጥ አስቀምጥ — ቀጣዩ ጊዜ ይሻላል
+  if (evaluation.suggestion && evaluation.score < 0.8) {
+    await updateKnowledge({
+      intents: [{
+        pattern: userMessage,
+        meaning: 'user question',
+        betterResponse: evaluation.suggestion
+      }]
+    }).catch(err => console.error('[LEARN] Update error:', err.message));
+  }
 
   return {
     response,
