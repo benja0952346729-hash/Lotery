@@ -101,10 +101,7 @@ export async function initDB() {
     )
   `);
 
-  // UNIQUE constraint — safely ignored if already exists
-  await query(`
-    ALTER TABLE token_usage ADD CONSTRAINT token_usage_service_unique UNIQUE (service)
-  `).catch(() => {});
+  // UNIQUE constraint already exists from table definition — skip
 
   // ── አዲስ — board_snapshots ──
   // አንተ board ስትልክ ሁሉ DeepSeek parse አርጎ እዚህ ይቀምጣል
