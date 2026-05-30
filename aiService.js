@@ -1,8 +1,8 @@
 import OpenAI from 'openai'; // DeepSeek uses OpenAI-compatible SDK
 import Groq from 'groq-sdk';
 import { EventEmitter } from 'events';
-import { getNextGroqKey, rotateGroqKey, getNextDeepSeekKey, rotateDeepSeekKey } from './core.js';
-import { readKnowledge, updateKnowledge, getHistory, getLotteryList } from './database.js';
+import { getNextGroqKey, rotateGroqKey, getNextDeepSeekKey, rotateDeepSeekKey } from './keys.js';
+import { readKnowledge, updateKnowledge, getHistory, getLotteryList, getTokenUsage, addTokenUsage } from './database.js';
 
 // ─────────────────────────────────────────
 // EVENTS
@@ -11,6 +11,19 @@ export const learningEvents = new EventEmitter();
 
 const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
 const BOT_NAME = process.env.BOT_NAME || 'Admin';
+
+// ─────────────────────────────────────────
+// TOKEN TRACKER
+// ─────────────────────────────────────────
+async function trackTokens(service, inputTokens, outputTokens) {
+  await addTokenUsage(service, inputTokens, outputTokens).catch(err =>
+    console.error('[TOKENS] Save error:', err.message)
+  );
+}
+
+export async function getTokenStats() {
+  return await getTokenUsage();
+}
 
 // ─────────────────────────────────────────
 // DEEPSEEK CALLER (replaces Gemini)
@@ -29,6 +42,7 @@ async function callDeepSeek(prompt, retries = 3) {
         max_tokens: 1000,
         temperature: 0.7,
       });
+      await trackTokens('deepseek', completion.usage?.prompt_tokens || 0, completion.usage?.completion_tokens || 0);
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
@@ -57,6 +71,7 @@ async function callGroq(messages, retries = 3) {
         max_tokens: 500,
         temperature: 0.7,
       });
+      await trackTokens('groq', completion.usage?.prompt_tokens || 0, completion.usage?.completion_tokens || 0);
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('rate limit')) {
