@@ -91,7 +91,7 @@ export async function initDB() {
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
       id SERIAL PRIMARY KEY,
-      service TEXT NOT NULL,
+      service TEXT NOT NULL UNIQUE,
       input_tokens BIGINT DEFAULT 0,
       output_tokens BIGINT DEFAULT 0,
       calls BIGINT DEFAULT 0,
@@ -99,11 +99,22 @@ export async function initDB() {
     )
   `);
 
-  // nvidia-deepseek ወደ token_usage ተጨምሯል
+  // UNIQUE constraint ካልተጨመረ ያክላል (bot restart ቢሆን error አይሰጥም)
+  await query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'token_usage_service_unique'
+      ) THEN
+        ALTER TABLE token_usage ADD CONSTRAINT token_usage_service_unique UNIQUE (service);
+      END IF;
+    END $$;
+  `).catch(() => {});
+
+  // nvidia-deepseek እና groq services ይጨምራል
   await query(`
     INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
     VALUES ('nvidia-deepseek', 0, 0, 0), ('groq', 0, 0, 0)
-    ON CONFLICT DO NOTHING
+    ON CONFLICT (service) DO NOTHING
   `);
 
   await query(`
