@@ -16,9 +16,8 @@ import { generateResponse, handleRegistration, generateAnnouncement } from './ai
 import { getKeyStats } from './keys.js';
 
 // ============================================================
-// 🔑 KEY ROTATION
+// 🔑 KEY ROTATION — imported via keys.js directly
 // ============================================================
-export { getNextDeepSeekKey, rotateDeepSeekKey, getNextGroqKey, rotateGroqKey } from './keys.js';
 
 // ============================================================
 // 👑 ADMIN HANDLER
@@ -26,11 +25,11 @@ export { getNextDeepSeekKey, rotateDeepSeekKey, getNextGroqKey, rotateGroqKey } 
 
 const ADMIN_ID = parseInt(process.env.ADMIN_CHAT_ID);
 
-export function isAdmin(userId) {
+function isAdmin(userId) {
   return userId === ADMIN_ID;
 }
 
-export async function alertAdmin(bot, message, level = 'INFO') {
+async function alertAdmin(bot, message, level = 'INFO') {
   const emoji = { INFO: 'ℹ️', WARNING: '⚠️', ERROR: '🚨', SUCCESS: '✅' }[level] || 'ℹ️';
   try {
     await bot.sendMessage(ADMIN_ID, `${emoji} ${message}`, { parse_mode: 'Markdown' });
@@ -86,9 +85,9 @@ function renderBoard(boardState, knowledge) {
 // ─────────────────────────────────────────
 // ADMIN COMMANDS
 // ─────────────────────────────────────────
-export const pendingResponses = new Map();
+const pendingResponses = new Map();
 
-export async function handleAdminCommand(bot, msg) {
+async function handleAdminCommand(bot, msg) {
   const text = msg.text || '';
   const chatId = msg.chat.id;
 
@@ -387,7 +386,7 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
 
 const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
 
-export async function handleGroupMessage(bot, msg) {
+async function handleGroupMessage(bot, msg) {
   const text = msg.text || '';
   const userId = msg.from?.id;
   const username = msg.from?.username || msg.from?.first_name || 'User';
