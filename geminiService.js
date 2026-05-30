@@ -1,8 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { getNextGeminiKey, rotateGeminiKey } from './keyRotation.js';
-import { readDB, updateKnowledge } from '../db/database.js';
+import { getNextGeminiKey, rotateGeminiKey } from './core.js';
+import { readKnowledge, updateKnowledge, getHistory } from './database.js';
 
-// Call Gemini with auto key rotation on rate limit
 async function callGemini(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -13,7 +12,7 @@ async function callGemini(prompt, retries = 3) {
       return result.response.text();
     } catch (err) {
       if (err.status === 429 || err.message?.includes('quota')) {
-        console.log('[GEMINI] Rate limit hit, rotating key...');
+        console.log('[GEMINI] Rate limit, rotating key...');
         rotateGeminiKey();
         continue;
       }
@@ -23,49 +22,45 @@ async function callGemini(prompt, retries = 3) {
   throw new Error('All Gemini keys exhausted');
 }
 
-// Learn from a message
 export async function learnFromMessage(message, isAdmin = false) {
-  const knowledge = await readDB('knowledge');
+  const knowledge = await readKnowledge();
 
   const prompt = `
-You are a learning AI that analyzes Telegram messages to understand admin behavior and user patterns.
+You are a learning AI analyzing Telegram messages to understand admin behavior in an Amharic lottery group.
 
-Current knowledge base summary:
-- Admin phrases known: ${knowledge.adminStyle.responses.length}
-- Rules known: ${knowledge.rules.length}
-- Intents known: ${knowledge.intents.length}
+Current knowledge:
+- Admin phrases known: ${knowledge.adminStyle?.responses?.length || 0}
+- Rules known: ${knowledge.rules?.length || 0}
+- Intents known: ${knowledge.intents?.length || 0}
 
-New message to analyze:
+New message:
 - From: ${isAdmin ? 'ADMIN' : 'USER'}
 - Username: ${message.from?.username || 'unknown'}
 - Text: "${message.text}"
 
-Extract and return ONLY valid JSON (no markdown, no explanation):
+Return ONLY valid JSON (no markdown):
 {
   "adminStyle": {
-    "responses": ${isAdmin ? '["add this phrase if admin said something useful"]' : '[]'},
+    "responses": ${isAdmin ? '["phrase if useful"]' : '[]'},
     "greetings": [],
     "warnings": [],
     "announcements": []
   },
-  "rules": ["any rule mentioned"],
-  "intents": [{"pattern": "what user said", "meaning": "what they want", "response": "how admin replied"}],
+  "rules": [],
+  "intents": [{"pattern": "user said", "meaning": "what they want", "response": "how admin replied"}],
   "writingStyle": {
-    "amharic": ["amharic phrases used"],
-    "commonPhrases": ["common phrases"]
+    "amharic": [],
+    "commonPhrases": []
   },
   "shouldUpdate": true
-}
-`;
+}`;
 
   try {
     const response = await callGemini(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
-
     if (parsed.shouldUpdate) {
       await updateKnowledge(parsed);
-      console.log('[GEMINI] Knowledge updated from message');
     }
     return parsed;
   } catch (err) {
@@ -74,45 +69,36 @@ Extract and return ONLY valid JSON (no markdown, no explanation):
   }
 }
 
-// Evaluate Groq's response and give feedback
-export async function evaluateGroqResponse(userMessage, groqResponse, context) {
-  const knowledge = await readDB('knowledge');
+export async function evaluateGroqResponse(userMessage, groqResponse) {
+  const knowledge = await readKnowledge();
 
   const prompt = `
-You are a trainer AI evaluating a bot's response. The bot is trying to replace an admin in an Amharic Telegram lottery group.
+You are a trainer AI evaluating a bot's response in an Amharic Telegram lottery group.
 
-Admin's known style: ${JSON.stringify(knowledge.adminStyle.responses.slice(0, 10))}
-Known rules: ${JSON.stringify(knowledge.rules)}
+Admin style: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 10))}
+Rules: ${JSON.stringify(knowledge.rules)}
 
 User said: "${userMessage}"
 Bot responded: "${groqResponse}"
 
-Evaluate and return ONLY valid JSON:
+Return ONLY valid JSON:
 {
   "score": 0.85,
   "isCorrect": true,
-  "issues": ["list any problems"],
-  "amharicIssues": ["amharic language problems"],
-  "suggestion": "better response would be...",
+  "issues": [],
+  "amharicIssues": [],
+  "suggestion": "better response",
   "intentUpdate": {"pattern": "...", "meaning": "...", "betterResponse": "..."},
-  "shouldLearn": true
-}
-
-Score 0-1. Above 0.9 means excellent. Be strict about Amharic accuracy.
-`;
+  "shouldLearn": false
+}`;
 
   try {
     const response = await callGemini(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const evaluation = JSON.parse(clean);
-
-    // If should learn, update intents
     if (evaluation.shouldLearn && evaluation.intentUpdate) {
-      await updateKnowledge({
-        intents: [evaluation.intentUpdate],
-      });
+      await updateKnowledge({ intents: [evaluation.intentUpdate] });
     }
-
     return evaluation;
   } catch (err) {
     console.error('[GEMINI] Evaluate error:', err.message);
@@ -120,54 +106,51 @@ Score 0-1. Above 0.9 means excellent. Be strict about Amharic accuracy.
   }
 }
 
-// Learn lottery rules from admin message
 export async function learnLotteryRules(adminMessage) {
   const prompt = `
-Extract lottery rules from this admin message in a Telegram group.
-Admin said: "${adminMessage}"
+Extract lottery rules from this admin message: "${adminMessage}"
 
 Return ONLY valid JSON:
 {
-  "rules": ["rule 1", "rule 2"],
-  "registrationInfo": "how to register",
+  "rules": [],
+  "registrationInfo": "",
   "numberRange": {"min": 1, "max": 100},
-  "eligibility": "who can join",
-  "isRule": true
-}
-`;
+  "eligibility": "",
+  "isRule": false
+}`;
 
   try {
     const response = await callGemini(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
+    const parsed = JSON.parse(clean);
+    if (parsed.isRule && parsed.rules.length > 0) {
+      await updateKnowledge({ rules: parsed.rules });
+    }
+    return parsed;
   } catch (err) {
-    console.error('[GEMINI] Rule learn error:', err.message);
+    console.error('[GEMINI] Rule error:', err.message);
     return null;
   }
 }
 
-// Generate daily learning summary
 export async function generateLearningSummary() {
-  const knowledge = await readDB('knowledge');
-  const history = await readDB('history');
-
-  const recentMessages = history.messages.slice(-50);
+  const knowledge = await readKnowledge();
+  const history = await getHistory(10);
 
   const prompt = `
-Summarize what you've learned from this Telegram lottery group in the last period.
+Summarize learning from this Telegram lottery group.
 
-Knowledge base: ${JSON.stringify(knowledge)}
-Recent messages count: ${recentMessages.length}
+Knowledge: ${JSON.stringify(knowledge)}
+Messages in last 10 days: ${history.length}
 
 Return ONLY valid JSON:
 {
   "summary": "brief summary in Amharic and English",
-  "newThingsLearned": ["thing 1", "thing 2"],
-  "weakAreas": ["area needing improvement"],
+  "newThingsLearned": [],
+  "weakAreas": [],
   "confidence": 0.75,
   "readyToReplace": false
-}
-`;
+}`;
 
   try {
     const response = await callGemini(prompt);
