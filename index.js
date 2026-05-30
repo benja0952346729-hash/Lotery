@@ -7,7 +7,10 @@ import {
   registerMember, getLotteryList, getBotState, setBotState,
   initDB, query,
 } from './database.js';
-import { learnFromMessage, learnLotteryRules, generateLearningSummary, learningEvents, getTokenStats } from './aiService.js';
+import {
+  learnFromMessage, learnLotteryRules, generateLearningSummary,
+  learningEvents, getTokenStats, testNvidiaConnection
+} from './aiService.js';
 import { generateResponse, handleRegistration, generateAnnouncement } from './aiService.js';
 import { getKeyStats } from './keys.js';
 
@@ -67,7 +70,7 @@ export async function handleAdminCommand(bot, msg) {
 🎰 Lottery:
   • Registered: ${lotteryList.length}/100
 🔑 Keys:
-  • DeepSeek: ${keyStats.deepseek.total} keys
+  • DeepSeek/NVIDIA: ${keyStats.deepseek.total} keys
   • Groq: ${keyStats.groq.total} keys
     `;
     await bot.sendMessage(chatId, status, { parse_mode: 'Markdown' });
@@ -135,12 +138,12 @@ ${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No
 
   if (text === '/tokens') {
     const t = await getTokenStats();
-    const ds = t.deepseek || { calls:0, input:0, output:0, total:0 };
+    const ds = t['nvidia-deepseek'] || t.deepseek || { calls:0, input:0, output:0, total:0 };
     const gr = t.groq     || { calls:0, input:0, output:0, total:0 };
     await bot.sendMessage(chatId, `
 🔢 *TOKEN USAGE*
 ━━━━━━━━━━━━━━
-🧠 *DeepSeek*
+🧠 *NVIDIA DeepSeek V4 Flash*
   • Calls: ${ds.calls.toLocaleString()}
   • Input:  ${ds.input.toLocaleString()} tokens
   • Output: ${ds.output.toLocaleString()} tokens
@@ -159,7 +162,6 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
     return;
   }
 
-
   if (text === '/history') {
     const history = await getHistory(10);
     await bot.sendMessage(chatId, `📜 Last 10 days: ${history.length} messages saved in DB`);
@@ -177,7 +179,6 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
 /knowledge - Knowledge base
 /history - History stats
 /tokens - Token usage
-/resettokens - Token reset
 /announce <text> - Announcement
   `, { parse_mode: 'Markdown' });
 }
@@ -533,7 +534,19 @@ cron.schedule('0 21 * * *', async () => {
 
 bot.getMe().then(async (me) => {
   console.log(`✅ Bot started: @${me.username}`);
-  await alertAdmin(bot, `✅ Bot started!\n@${me.username} is online.\n\nType /status`, 'SUCCESS');
+
+  // NVIDIA + DeepSeek connection test
+  const nvidiaOk = await testNvidiaConnection();
+  if (!nvidiaOk) {
+    console.warn('⚠️ NVIDIA connection failed — learning ላይቀሰቀስ ይችላል');
+  }
+
+  await alertAdmin(
+    bot,
+    `✅ Bot started!\n@${me.username} is online.\n\n` +
+    `🧠 NVIDIA DeepSeek: ${nvidiaOk ? '✅ Online' : '❌ Offline'}\n\nType /status`,
+    'SUCCESS'
+  );
 }).catch(err => {
   console.error('❌ Bot failed to start:', err.message);
   process.exit(1);
