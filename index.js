@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import express from 'express';
 import TelegramBot from 'node-telegram-bot-api';
 import cron from 'node-cron';
 import {
@@ -9,6 +10,22 @@ import {
   pendingResponses,
 } from './core.js';
 import { generateLearningSummary } from './geminiService.js';
+
+// ===== EXPRESS SERVER =====
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.send('🤖 Lottery Bot is running!');
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Web server running on port ${PORT}`);
+});
 
 // ===== VALIDATE ENV =====
 const required = ['TELEGRAM_BOT_TOKEN', 'ADMIN_CHAT_ID', 'GROUP_CHAT_ID'];
@@ -33,7 +50,6 @@ bot.on('message', async (msg) => {
 
     if (msg.chat.type === 'private') {
       if (isAdmin(userId)) {
-
         if (text.startsWith('/approve_')) {
           const pendingId = text.replace('/approve_', '');
           const pending = pendingResponses.get(pendingId);
