@@ -1,4 +1,4 @@
-import OpenAI from 'openai'; // DeepSeek uses OpenAI-compatible SDK
+import OpenAI from 'openai';
 import Groq from 'groq-sdk';
 import { EventEmitter } from 'events';
 import { getNextGroqKey, rotateGroqKey, getNextDeepSeekKey, rotateDeepSeekKey } from './keys.js';
@@ -26,7 +26,7 @@ export async function getTokenStats() {
 }
 
 // ─────────────────────────────────────────
-// DEEPSEEK CALLER (replaces Gemini)
+// NVIDIA NIM CALLER (DeepSeek V4 Flash)
 // ─────────────────────────────────────────
 async function callDeepSeek(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -34,19 +34,19 @@ async function callDeepSeek(prompt, retries = 3) {
       const key = getNextDeepSeekKey();
       const client = new OpenAI({
         apiKey: key,
-        baseURL: 'https://api.deepseek.com',
+        baseURL: 'https://integrate.api.nvidia.com/v1', // ← NVIDIA NIM
       });
       const completion = await client.chat.completions.create({
-        model: 'deepseek-chat',
+        model: 'deepseek-ai/deepseek-v4-flash', // ← DeepSeek V4 Flash
         messages: [{ role: 'user', content: prompt }],
         max_tokens: 1000,
         temperature: 0.7,
       });
-      await trackTokens('deepseek', completion.usage?.prompt_tokens || 0, completion.usage?.completion_tokens || 0);
+      await trackTokens('nvidia-deepseek', completion.usage?.prompt_tokens || 0, completion.usage?.completion_tokens || 0);
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
-        console.log('[DEEPSEEK] Rate limit, rotating key...');
+        console.log('[NVIDIA] Rate limit, rotating key...');
         rotateDeepSeekKey();
         await new Promise(res => setTimeout(res, 2000));
         continue;
@@ -54,7 +54,7 @@ async function callDeepSeek(prompt, retries = 3) {
       throw err;
     }
   }
-  throw new Error('All DeepSeek keys exhausted');
+  throw new Error('All NVIDIA keys exhausted');
 }
 
 // ─────────────────────────────────────────
@@ -134,7 +134,7 @@ Return ONLY valid JSON (no markdown):
     });
     return parsed;
   } catch (err) {
-    console.error('[DEEPSEEK] Learn error:', err.message);
+    console.error('[NVIDIA] Learn error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Learn error: ${err.message}`
@@ -182,7 +182,7 @@ Return ONLY valid JSON:
     });
     return evaluation;
   } catch (err) {
-    console.error('[DEEPSEEK] Evaluate error:', err.message);
+    console.error('[NVIDIA] Evaluate error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Evaluate error: ${err.message}`
@@ -220,7 +220,7 @@ Return ONLY valid JSON:
     }
     return parsed;
   } catch (err) {
-    console.error('[DEEPSEEK] Rule error:', err.message);
+    console.error('[NVIDIA] Rule error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Rule error: ${err.message}`
@@ -261,7 +261,7 @@ Return ONLY valid JSON:
     });
     return parsed;
   } catch (err) {
-    console.error('[DEEPSEEK] Summary error:', err.message);
+    console.error('[NVIDIA] Summary error:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
       msg: `Summary error: ${err.message}`
