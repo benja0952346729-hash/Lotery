@@ -99,9 +99,10 @@ export async function initDB() {
     )
   `);
 
+  // nvidia-deepseek ወደ token_usage ተጨምሯል
   await query(`
     INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
-    VALUES ('deepseek', 0, 0, 0), ('groq', 0, 0, 0)
+    VALUES ('nvidia-deepseek', 0, 0, 0), ('groq', 0, 0, 0)
     ON CONFLICT DO NOTHING
   `);
 
@@ -228,12 +229,13 @@ export async function setBotState(isOn, adminId) {
 // ===== TOKEN USAGE =====
 export async function addTokenUsage(service, inputTokens, outputTokens) {
   await query(`
-    UPDATE token_usage
-    SET input_tokens = input_tokens + $1,
-        output_tokens = output_tokens + $2,
-        calls = calls + 1,
+    INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
+    VALUES ($3, $1, $2, 1)
+    ON CONFLICT (service) DO UPDATE
+    SET input_tokens = token_usage.input_tokens + $1,
+        output_tokens = token_usage.output_tokens + $2,
+        calls = token_usage.calls + 1,
         updated_at = NOW()
-    WHERE service = $3
   `, [inputTokens, outputTokens, service]);
 }
 
