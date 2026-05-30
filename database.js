@@ -21,7 +21,6 @@ function loadPools() {
 const pools = loadPools();
 let currentPoolIndex = 0;
 
-// Rotate pool if one fails
 function getPool() {
   return pools[currentPoolIndex % pools.length];
 }
@@ -31,7 +30,6 @@ function rotatePool() {
   console.log(`[DB] Rotated to DB #${currentPoolIndex + 1}`);
 }
 
-// Query with auto-rotation on failure
 async function query(sql, params = [], retries = pools.length) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -89,13 +87,29 @@ export async function initDB() {
     )
   `);
 
-  // Insert default bot state if not exists
+  // ===== TOKEN USAGE TABLE =====
+  await query(`
+    CREATE TABLE IF NOT EXISTS token_usage (
+      id SERIAL PRIMARY KEY,
+      service TEXT NOT NULL,
+      input_tokens BIGINT DEFAULT 0,
+      output_tokens BIGINT DEFAULT 0,
+      calls BIGINT DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
+    VALUES ('deepseek', 0, 0, 0), ('groq', 0, 0, 0)
+    ON CONFLICT DO NOTHING
+  `);
+
   await query(`
     INSERT INTO bot_state (id, is_on) VALUES (1, FALSE)
     ON CONFLICT (id) DO NOTHING
   `);
 
-  // Insert default knowledge if not exists
   const defaults = {
     adminStyle: { greetings: [], warnings: [], announcements: [], responses: [] },
     userPatterns: {},
@@ -142,7 +156,7 @@ function deepMergeArrays(target, source) {
   return result;
 }
 
-// ===== HISTORY (10 days) =====
+// ===== HISTORY =====
 export async function saveHistory(message) {
   await query(`
     INSERT INTO history (message_id, user_id, username, first_name, text, is_admin)
@@ -156,7 +170,6 @@ export async function saveHistory(message) {
     message._isAdmin || false,
   ]);
 
-  // Delete messages older than 10 days
   await query(`
     DELETE FROM history WHERE created_at < NOW() - INTERVAL '10 days'
   `);
@@ -174,11 +187,9 @@ export async function getHistory(days = 10) {
 
 // ===== LOTTERY =====
 export async function registerMember(userId, username, number) {
-  // Check if number taken
   const taken = await query(`SELECT id FROM lottery WHERE number = $1`, [number]);
   if (taken.rows.length > 0) return { success: false, reason: 'number_taken' };
 
-  // Check if already registered
   const already = await query(`SELECT number FROM lottery WHERE user_id = $1`, [userId]);
   if (already.rows.length > 0) return { success: false, reason: 'already_registered', number: already.rows[0].number };
 
@@ -212,6 +223,37 @@ export async function setBotState(isOn, adminId) {
   await query(`
     UPDATE bot_state SET is_on = $1, toggled_at = NOW(), toggled_by = $2 WHERE id = 1
   `, [isOn, adminId]);
+}
+
+// ===== TOKEN USAGE =====
+export async function addTokenUsage(service, inputTokens, outputTokens) {
+  await query(`
+    UPDATE token_usage
+    SET input_tokens = input_tokens + $1,
+        output_tokens = output_tokens + $2,
+        calls = calls + 1,
+        updated_at = NOW()
+    WHERE service = $3
+  `, [inputTokens, outputTokens, service]);
+}
+
+export async function getTokenUsage() {
+  const res = await query(`SELECT * FROM token_usage ORDER BY service`);
+  const result = {};
+  for (const row of res.rows) {
+    result[row.service] = {
+      input: parseInt(row.input_tokens),
+      output: parseInt(row.output_tokens),
+      calls: parseInt(row.calls),
+      total: parseInt(row.input_tokens) + parseInt(row.output_tokens),
+      updatedAt: row.updated_at,
+    };
+  }
+  return result;
+}
+
+export async function resetTokenUsage() {
+  await query(`UPDATE token_usage SET input_tokens=0, output_tokens=0, calls=0, updated_at=NOW()`);
 }
 
 export { query };
