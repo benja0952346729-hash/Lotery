@@ -115,7 +115,7 @@ export async function initDB() {
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     )
-  `);
+  `).catch(err => console.error('[DB] board_snapshots:', err.message));
 
   // Default rows
   await query(`
