@@ -90,10 +90,12 @@ export async function initDB() {
     )
   `);
 
+  // ── FIX: token_usage — UNIQUE constraint በትክክል ያስተካክላል ──
+  // 1) Table ይፈጥራል (ከሌለ)
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
       id SERIAL PRIMARY KEY,
-      service TEXT NOT NULL UNIQUE,
+      service TEXT NOT NULL,
       input_tokens BIGINT DEFAULT 0,
       output_tokens BIGINT DEFAULT 0,
       calls BIGINT DEFAULT 0,
@@ -101,11 +103,26 @@ export async function initDB() {
     )
   `);
 
-  // UNIQUE constraint already exists from table definition — skip
+  // 2) Broken index/constraint ካለ ይሰርዛል (idempotent)
+  await query(`
+    DROP INDEX IF EXISTS token_usage_service_unique
+  `).catch(() => {});
 
-  // ── አዲስ — board_snapshots ──
-  // አንተ board ስትልክ ሁሉ DeepSeek parse አርጎ እዚህ ይቀምጣል
-  // code ቀጥታ አይነካውም — DeepSeek ብቻ ነው የሚጽፈው
+  // 3) UNIQUE constraint — ከሌለ ብቻ ይጨምራል
+  await query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'token_usage_service_uq'
+          AND conrelid = 'token_usage'::regclass
+      ) THEN
+        ALTER TABLE token_usage ADD CONSTRAINT token_usage_service_uq UNIQUE (service);
+      END IF;
+    END
+    $$
+  `).catch(err => console.warn('[DB] token_usage constraint:', err.message));
+
   await query(`
     CREATE TABLE IF NOT EXISTS board_snapshots (
       id SERIAL PRIMARY KEY,
@@ -279,8 +296,6 @@ export async function resetTokenUsage() {
 }
 
 // ===== BOARD SNAPSHOTS =====
-// DeepSeek ብቻ ነው የሚጽፈው — code ቀጥታ አይነካም
-
 export async function getBoardState() {
   const res = await query(`
     SELECT * FROM board_snapshots ORDER BY updated_at DESC LIMIT 1
