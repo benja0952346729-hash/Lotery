@@ -9,7 +9,7 @@ function loadPools() {
   while (process.env[`NEON_DB_${i}`] && i <= 10) {
     pools.push(new Pool({
       connectionString: process.env[`NEON_DB_${i}`],
-      ssl: { rejectUnauthorized: false },
+      ssl: true,
     }));
     i++;
   }
