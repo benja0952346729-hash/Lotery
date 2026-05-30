@@ -26,6 +26,41 @@ export async function getTokenStats() {
 }
 
 // ─────────────────────────────────────────
+// STARTUP TEST — NVIDIA + DeepSeek ይሞክራል
+// ─────────────────────────────────────────
+export async function testNvidiaConnection() {
+  try {
+    console.log('🔌 NVIDIA NIM እየተገናኘ...');
+    const key = getNextDeepSeekKey();
+    const client = new OpenAI({
+      apiKey: key,
+      baseURL: 'https://integrate.api.nvidia.com/v1',
+    });
+    const completion = await client.chat.completions.create({
+      model: 'deepseek-ai/deepseek-v4-flash',
+      messages: [{ role: 'user', content: 'say "ok" only' }],
+      max_tokens: 5,
+      temperature: 0,
+    });
+    const reply = completion.choices[0]?.message?.content || '';
+    console.log('✅ NVIDIA NIM Online — DeepSeek V4 Flash ዝግጁ ነው!');
+    console.log(`🧠 Test response: "${reply.trim()}"`);
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: '✅ NVIDIA NIM Online — DeepSeek V4 Flash ዝግጁ ነው!'
+    });
+    return true;
+  } catch (err) {
+    console.error('❌ NVIDIA NIM connection failed:', err.message);
+    learningEvents.emit('activity', {
+      type: 'error',
+      msg: `❌ NVIDIA connection failed: ${err.message}`
+    });
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────
 // NVIDIA NIM CALLER (DeepSeek V4 Flash)
 // ─────────────────────────────────────────
 async function callDeepSeek(prompt, retries = 3) {
