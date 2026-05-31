@@ -1174,4 +1174,4 @@ Return ONLY valid JSON:
     console.error('[RATING] Learn error:', err.message);
     return null;
   }
-                   }
+}
