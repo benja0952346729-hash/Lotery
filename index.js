@@ -888,7 +888,7 @@ bot.on('callback_query', async (query) => {
 
   // ── RATING SUBMIT ──
   if (data.startsWith('rate_')) {
-    const [ratingId, scoreStr] = data.rsplit(':', 1);
+   
     // rsplit አይሰራም — split እንጠቀም
     const lastColon = data.lastIndexOf(':');
     const rId = data.substring(0, lastColon);
