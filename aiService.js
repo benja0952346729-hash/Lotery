@@ -89,8 +89,7 @@ async function callGroq(messages, retries = 3) {
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('rate limit')) {
-        console.log('[GROQ] Rate limit — rotating key...');
-        rotateGroqKey();
+        console.log(`[GROQ] Rate limit — key rotating... (attempt ${i + 1}/${retries})`);
         await new Promise(res => setTimeout(res, 2000));
         continue;
       }
