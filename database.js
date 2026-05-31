@@ -79,7 +79,6 @@ export async function initDB() {
     )
   `);
 
-  // ✅ bot_state — last_board_message_id column ጨምር
   await query(`
     CREATE TABLE IF NOT EXISTS bot_state (
       id INTEGER PRIMARY KEY DEFAULT 1,
@@ -90,7 +89,6 @@ export async function initDB() {
     )
   `);
 
-  // ቀድሞ table ካለ column ጨምር
   await query(`
     ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS last_board_message_id BIGINT DEFAULT NULL
   `).catch(() => {});
@@ -116,6 +114,42 @@ export async function initDB() {
       updated_at TIMESTAMP DEFAULT NOW()
     )
   `).catch(err => console.error('[DB] board_snapshots:', err.message));
+
+  // ── አዲስ: Action Logs ──
+  // አንተ ያደረጋቸው actions ሁሉ ይቀመጣሉ — ለምን፣ መቼ፣ እንዴት
+  await query(`
+    CREATE TABLE IF NOT EXISTS action_logs (
+      id SERIAL PRIMARY KEY,
+      action_type TEXT NOT NULL,
+      trigger TEXT,
+      reason TEXT,
+      details JSONB DEFAULT '{}',
+      is_admin BOOLEAN DEFAULT FALSE,
+      confidence FLOAT DEFAULT 1.0,
+      times_seen INTEGER DEFAULT 1,
+      times_correct INTEGER DEFAULT 1,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  // ── አዲስ: Q&A Pairs ──
+  // ሰው ጠየቀ + አንተ/bot መለሰ → pair ይቀመጣል
+  await query(`
+    CREATE TABLE IF NOT EXISTS qa_pairs (
+      id SERIAL PRIMARY KEY,
+      user_message TEXT NOT NULL,
+      admin_reply TEXT NOT NULL,
+      context TEXT,
+      intent TEXT,
+      confidence FLOAT DEFAULT 1.0,
+      times_used INTEGER DEFAULT 0,
+      times_correct INTEGER DEFAULT 0,
+      is_admin_verified BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 
   await ensureTokenService('nvidia-deepseek');
   await ensureTokenService('groq');
@@ -183,7 +217,7 @@ function deepMergeArrays(target, source) {
   return result;
 }
 
-// ===== HISTORY =====
+// ===== HISTORY — 7 ቀን ብቻ =====
 export async function saveHistory(message) {
   await query(`
     INSERT INTO history (message_id, user_id, username, first_name, text, is_admin)
@@ -197,18 +231,170 @@ export async function saveHistory(message) {
     message._isAdmin || false,
   ]);
 
+  // 7 ቀን ያለፈ raw history ያጠፋ — learned knowledge ይቆያል
   await query(`
-    DELETE FROM history WHERE created_at < NOW() - INTERVAL '10 days'
+    DELETE FROM history WHERE created_at < NOW() - INTERVAL '7 days'
   `);
 }
 
-export async function getHistory(days = 10) {
+export async function getHistory(days = 7) {
   const res = await query(`
     SELECT * FROM history
     WHERE created_at > NOW() - INTERVAL '${days} days'
     ORDER BY created_at DESC
     LIMIT 500
   `);
+  return res.rows;
+}
+
+// ===== ACTION LOGS =====
+
+// አዲስ action ያስቀምጣል ወይም ያለውን ያዘምናል
+export async function saveActionLog(actionType, trigger, reason, details = {}, isAdmin = true) {
+  // ተመሳሳይ action ካለ ያዘምናል
+  const existing = await query(`
+    SELECT id, times_seen, times_correct FROM action_logs
+    WHERE action_type = $1 AND trigger = $2
+    LIMIT 1
+  `, [actionType, trigger]);
+
+  if (existing.rows.length > 0) {
+    const row = existing.rows[0];
+    await query(`
+      UPDATE action_logs
+      SET times_seen = times_seen + 1,
+          times_correct = times_correct + 1,
+          confidence = LEAST(1.0, $1::float),
+          details = $2,
+          updated_at = NOW()
+      WHERE id = $3
+    `, [
+      (row.times_correct + 1) / (row.times_seen + 1),
+      JSON.stringify(details),
+      row.id,
+    ]);
+  } else {
+    await query(`
+      INSERT INTO action_logs (action_type, trigger, reason, details, is_admin, confidence)
+      VALUES ($1, $2, $3, $4, $5, 1.0)
+    `, [actionType, trigger, reason, JSON.stringify(details), isAdmin]);
+  }
+}
+
+// Action confidence ያዘምናል — ልክ ነበር ወይ አልነበረም
+export async function updateActionConfidence(actionType, trigger, wasCorrect) {
+  const res = await query(`
+    SELECT id, times_seen, times_correct FROM action_logs
+    WHERE action_type = $1 AND trigger = $2
+  `, [actionType, trigger]);
+
+  if (res.rows.length > 0) {
+    const row = res.rows[0];
+    const newCorrect = row.times_correct + (wasCorrect ? 1 : 0);
+    const newSeen = row.times_seen + 1;
+    const newConfidence = newCorrect / newSeen;
+
+    await query(`
+      UPDATE action_logs
+      SET times_seen = $1, times_correct = $2, confidence = $3, updated_at = NOW()
+      WHERE id = $4
+    `, [newSeen, newCorrect, newConfidence, row.id]);
+  }
+}
+
+// Actions ያወጣል — Groq ለማስተማር
+export async function getActionLogs(minConfidence = 0.0) {
+  const res = await query(`
+    SELECT * FROM action_logs
+    WHERE confidence >= $1
+    ORDER BY confidence DESC, times_seen DESC
+    LIMIT 50
+  `, [minConfidence]);
+  return res.rows;
+}
+
+// ===== Q&A PAIRS =====
+
+// ሰው ጠየቀ + admin/bot መለሰ → pair ያስቀምጣል
+export async function saveQAPair(userMessage, adminReply, context = '', intent = '', isAdminVerified = false) {
+  // ተመሳሳይ question ካለ ያዘምናል
+  const existing = await query(`
+    SELECT id, times_used, times_correct FROM qa_pairs
+    WHERE user_message = $1
+    LIMIT 1
+  `, [userMessage]);
+
+  if (existing.rows.length > 0) {
+    const row = existing.rows[0];
+    await query(`
+      UPDATE qa_pairs
+      SET admin_reply = $1,
+          times_used = times_used + 1,
+          times_correct = times_correct + 1,
+          confidence = LEAST(1.0, $2::float),
+          is_admin_verified = $3,
+          updated_at = NOW()
+      WHERE id = $4
+    `, [
+      adminReply,
+      (row.times_correct + 1) / (row.times_used + 1),
+      isAdminVerified,
+      row.id,
+    ]);
+  } else {
+    await query(`
+      INSERT INTO qa_pairs (user_message, admin_reply, context, intent, confidence, is_admin_verified)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [userMessage, adminReply, context, intent, isAdminVerified ? 1.0 : 0.7, isAdminVerified]);
+  }
+}
+
+// Q&A confidence ያዘምናል
+export async function updateQAConfidence(userMessage, wasCorrect) {
+  const res = await query(`
+    SELECT id, times_used, times_correct FROM qa_pairs
+    WHERE user_message = $1
+  `, [userMessage]);
+
+  if (res.rows.length > 0) {
+    const row = res.rows[0];
+    const newCorrect = row.times_correct + (wasCorrect ? 1 : 0);
+    const newUsed = row.times_used + 1;
+    const newConfidence = newCorrect / newUsed;
+
+    await query(`
+      UPDATE qa_pairs
+      SET times_used = $1, times_correct = $2, confidence = $3, updated_at = NOW()
+      WHERE id = $4
+    `, [newUsed, newCorrect, newConfidence, row.id]);
+  }
+}
+
+// ተመሳሳይ question ፈልግ
+export async function findSimilarQA(userMessage, limit = 5) {
+  const res = await query(`
+    SELECT * FROM qa_pairs
+    WHERE confidence > 0.5
+    ORDER BY
+      CASE WHEN user_message = $1 THEN 1
+           WHEN user_message ILIKE $2 THEN 2
+           ELSE 3
+      END,
+      confidence DESC,
+      times_correct DESC
+    LIMIT $3
+  `, [userMessage, `%${userMessage.slice(0, 20)}%`, limit]);
+  return res.rows;
+}
+
+// Best Q&A pairs ያወጣል — Groq ለማስተማር
+export async function getBestQAPairs(limit = 30) {
+  const res = await query(`
+    SELECT * FROM qa_pairs
+    WHERE confidence >= 0.7
+    ORDER BY is_admin_verified DESC, confidence DESC, times_correct DESC
+    LIMIT $1
+  `, [limit]);
   return res.rows;
 }
 
@@ -252,7 +438,6 @@ export async function setBotState(isOn, adminId) {
   `, [isOn, adminId]);
 }
 
-// ✅ Board message ID — save + get
 export async function saveLastBoardMessageId(messageId) {
   await query(`
     UPDATE bot_state SET last_board_message_id = $1 WHERE id = 1
