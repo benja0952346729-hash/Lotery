@@ -451,8 +451,8 @@ async function handleGroupMessage(bot, msg) {
   const isOn = await getBotState();
   if (!isOn) return;
 
-  // Batch buffer ያስቀምጣል
-  addToBuffer(msg, false);
+// (ምንም አይጨምር — ይጥላል ብቻ)
+
 
   // ── REGISTRATION CHECK ──
   const registrationMatch = text.match(/(\d+)/);
@@ -479,6 +479,9 @@ async function handleGroupMessage(bot, msg) {
       const sentMsg = await bot.sendMessage(chatId, result.response, {
         reply_to_message_id: msg.message_id,
       });
+
+      addToBuffer(msg, false, result.response);
+
 
       // Rating buttons — admin ብቻ ያያቸዋል (private alert)
       const ratingId = `rate_${sentMsg.message_id}_${Date.now()}`;
