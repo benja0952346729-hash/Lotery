@@ -90,8 +90,6 @@ export async function initDB() {
     )
   `);
 
-  // ── FIX: token_usage — UNIQUE constraint በትክክል ያስተካክላል ──
-  // 1) Table ይፈጥራል (ከሌለ)
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
       id SERIAL PRIMARY KEY,
@@ -102,26 +100,6 @@ export async function initDB() {
       updated_at TIMESTAMP DEFAULT NOW()
     )
   `);
-
-  // 2) Broken index/constraint ካለ ይሰርዛል (idempotent)
-  await query(`
-    DROP INDEX IF EXISTS token_usage_service_unique
-  `).catch(() => {});
-
-  // 3) UNIQUE constraint — ከሌለ ብቻ ይጨምራል
-  await query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'token_usage_service_uq'
-          AND conrelid = 'token_usage'::regclass
-      ) THEN
-        ALTER TABLE token_usage ADD CONSTRAINT token_usage_service_uq UNIQUE (service);
-      END IF;
-    END
-    $$
-  `).catch(err => console.warn('[DB] token_usage constraint:', err.message));
 
   await query(`
     CREATE TABLE IF NOT EXISTS board_snapshots (
@@ -134,12 +112,9 @@ export async function initDB() {
     )
   `).catch(err => console.error('[DB] board_snapshots:', err.message));
 
-  // Default rows
-  await query(`
-    INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
-    VALUES ('nvidia-deepseek', 0, 0, 0), ('groq', 0, 0, 0)
-    ON CONFLICT (service) DO NOTHING
-  `);
+  // Default rows — ON CONFLICT የለም፣ SELECT/INSERT ይጠቀማል
+  await ensureTokenService('nvidia-deepseek');
+  await ensureTokenService('groq');
 
   await query(`
     INSERT INTO bot_state (id, is_on) VALUES (1, FALSE)
@@ -162,6 +137,17 @@ export async function initDB() {
   `, [JSON.stringify(defaults)]);
 
   console.log('[DB] Tables initialized ✅');
+}
+
+// service row SELECT/INSERT — ON CONFLICT አያስፈልግም
+async function ensureTokenService(service) {
+  const res = await query(`SELECT id FROM token_usage WHERE service = $1`, [service]);
+  if (res.rows.length === 0) {
+    await query(`
+      INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
+      VALUES ($1, 0, 0, 0)
+    `, [service]);
+  }
 }
 
 // ===== KNOWLEDGE =====
@@ -263,17 +249,25 @@ export async function setBotState(isOn, adminId) {
   `, [isOn, adminId]);
 }
 
-// ===== TOKEN USAGE =====
+// ===== TOKEN USAGE — ON CONFLICT የለም፣ UPDATE/INSERT ይጠቀማል =====
 export async function addTokenUsage(service, inputTokens, outputTokens) {
-  await query(`
-    INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
-    VALUES ($3, $1, $2, 1)
-    ON CONFLICT (service) DO UPDATE
-    SET input_tokens = token_usage.input_tokens + $1,
-        output_tokens = token_usage.output_tokens + $2,
-        calls = token_usage.calls + 1,
+  // UPDATE ቀደም
+  const res = await query(`
+    UPDATE token_usage
+    SET input_tokens = input_tokens + $1,
+        output_tokens = output_tokens + $2,
+        calls = calls + 1,
         updated_at = NOW()
+    WHERE service = $3
   `, [inputTokens, outputTokens, service]);
+
+  // Row ከሌለ INSERT
+  if (res.rowCount === 0) {
+    await query(`
+      INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
+      VALUES ($1, $2, $3, 1)
+    `, [service, inputTokens, outputTokens]);
+  }
 }
 
 export async function getTokenUsage() {
