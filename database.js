@@ -2,7 +2,6 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
-// ===== LOAD UP TO 10 NEON DB CONNECTIONS =====
 function loadPools() {
   const pools = [];
   let i = 1;
@@ -47,7 +46,6 @@ async function query(sql, params = [], retries = Math.max(pools.length, 3)) {
   throw new Error('All Neon DBs failed');
 }
 
-// ===== INIT TABLES =====
 export async function initDB() {
   await query(`
     CREATE TABLE IF NOT EXISTS knowledge (
@@ -81,14 +79,21 @@ export async function initDB() {
     )
   `);
 
+  // ✅ bot_state — last_board_message_id column ጨምር
   await query(`
     CREATE TABLE IF NOT EXISTS bot_state (
       id INTEGER PRIMARY KEY DEFAULT 1,
       is_on BOOLEAN DEFAULT FALSE,
       toggled_at TIMESTAMP DEFAULT NOW(),
-      toggled_by BIGINT
+      toggled_by BIGINT,
+      last_board_message_id BIGINT DEFAULT NULL
     )
   `);
+
+  // ቀድሞ table ካለ column ጨምር
+  await query(`
+    ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS last_board_message_id BIGINT DEFAULT NULL
+  `).catch(() => {});
 
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
@@ -112,7 +117,6 @@ export async function initDB() {
     )
   `).catch(err => console.error('[DB] board_snapshots:', err.message));
 
-  // Default rows — ON CONFLICT የለም፣ SELECT/INSERT ይጠቀማል
   await ensureTokenService('nvidia-deepseek');
   await ensureTokenService('groq');
 
@@ -139,7 +143,6 @@ export async function initDB() {
   console.log('[DB] Tables initialized ✅');
 }
 
-// service row SELECT/INSERT — ON CONFLICT አያስፈልግም
 async function ensureTokenService(service) {
   const res = await query(`SELECT id FROM token_usage WHERE service = $1`, [service]);
   if (res.rows.length === 0) {
@@ -249,9 +252,20 @@ export async function setBotState(isOn, adminId) {
   `, [isOn, adminId]);
 }
 
-// ===== TOKEN USAGE — ON CONFLICT የለም፣ UPDATE/INSERT ይጠቀማል =====
+// ✅ Board message ID — save + get
+export async function saveLastBoardMessageId(messageId) {
+  await query(`
+    UPDATE bot_state SET last_board_message_id = $1 WHERE id = 1
+  `, [messageId]);
+}
+
+export async function getLastBoardMessageId() {
+  const res = await query(`SELECT last_board_message_id FROM bot_state WHERE id = 1`);
+  return res.rows[0]?.last_board_message_id || null;
+}
+
+// ===== TOKEN USAGE =====
 export async function addTokenUsage(service, inputTokens, outputTokens) {
-  // UPDATE ቀደም
   const res = await query(`
     UPDATE token_usage
     SET input_tokens = input_tokens + $1,
@@ -261,7 +275,6 @@ export async function addTokenUsage(service, inputTokens, outputTokens) {
     WHERE service = $3
   `, [inputTokens, outputTokens, service]);
 
-  // Row ከሌለ INSERT
   if (res.rowCount === 0) {
     await query(`
       INSERT INTO token_usage (service, input_tokens, output_tokens, calls)
