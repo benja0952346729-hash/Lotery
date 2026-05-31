@@ -428,18 +428,19 @@ async function handleGroupMessage(bot, msg) {
 
       // Admin ራሱን reply አላደረገም + user message ካለ
       if (repliedUserId !== ADMIN_ID && userText) {
-        learnQAPair(userText, text, `group conversation`).then(() => {
-          learningEvents.emit('activity', {
-            type: 'learn',
-            msg: `💬 Q&A learned — "${userText.slice(0, 30)}" → "${text.slice(0, 30)}"`
-          });
-        }).catch(err =>
-          console.error('[QA] Learn error:', err.message)
+        addToBuffer(
+          { text: `[BOT_CORRECTION] Bot ተሳስቷል። User ጠየቀ: "${userText}" — ትክክለኛ መልስ: "${text}"` },
+          true,
+          null
         );
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `💬 Correction buffered — "${userText.slice(0, 30)}" → "${text.slice(0, 30)}"`
+        });
       }
     }
 
-    // Batch buffer ያስቀምጣል — 50 ሲሞሉ ወይም 10 min → DeepSeek
+    // Batch buffer ያስቀምጣል
     addToBuffer(msg, true);
     learnLotteryRules(text).catch(err =>
       console.error('[RULES] Error:', err.message)
