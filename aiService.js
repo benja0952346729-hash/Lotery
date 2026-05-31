@@ -1153,10 +1153,10 @@ Return ONLY valid JSON:
     }
 
     if (isBad) {
-      updates.rules = [
-        parsed.ruleToAdd || `Never respond like "${botResponse.slice(0, 50)}" to "${userText.slice(0, 50)}"`,
-      ];
-    }
+  updates.rules = [
+    `Avoid responding like "${botResponse.slice(0, 50)}" when user says "${userText.slice(0, 50)}" — find a better response`,
+  ];
+}
 
     if (Object.keys(updates).length > 0) {
       await updateKnowledge(updates);
@@ -1174,4 +1174,4 @@ Return ONLY valid JSON:
     console.error('[RATING] Learn error:', err.message);
     return null;
   }
-}
+                   }
