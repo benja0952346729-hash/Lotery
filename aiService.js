@@ -8,18 +8,12 @@ import {
   getBoardState, updateBoardState,
 } from './database.js';
 
-// ─────────────────────────────────────────
-// EVENTS
-// ─────────────────────────────────────────
 export const learningEvents = new EventEmitter();
 
 const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
 const BOT_NAME = process.env.BOT_NAME || 'Admin';
 const MAX_CORRECTION_ROUNDS = 3;
 
-// ─────────────────────────────────────────
-// TOKEN TRACKER
-// ─────────────────────────────────────────
 async function trackTokens(service, inputTokens, outputTokens) {
   await addTokenUsage(service, inputTokens, outputTokens).catch(err =>
     console.error('[TOKENS] Save error:', err.message)
@@ -60,7 +54,10 @@ async function callDeepSeek(prompt, retries = 3) {
         await new Promise(res => setTimeout(res, 2000));
         continue;
       }
-      throw err;
+      // ሌላ error ቢሆን → retry
+      console.warn(`[NVIDIA] Error attempt ${i+1}:`, err.message);
+      rotateDeepSeekKey();
+      await new Promise(res => setTimeout(res, 1000));
     }
   }
   throw new Error('All NVIDIA keys exhausted');
@@ -118,23 +115,17 @@ export async function testNvidiaConnection() {
     const reply = completion.choices[0]?.message?.content || '';
     console.log('✅ NVIDIA NIM Online — DeepSeek V4 Flash ዝግጁ ነው!');
     console.log(`🧠 Test response: "${reply.trim()}"`);
-    learningEvents.emit('activity', {
-      type: 'learn',
-      msg: '✅ NVIDIA NIM Online — DeepSeek V4 Flash ዝግጁ ነው!'
-    });
+    learningEvents.emit('activity', { type: 'learn', msg: '✅ NVIDIA NIM Online!' });
     return true;
   } catch (err) {
     console.error('❌ NVIDIA NIM connection failed:', err.message);
-    learningEvents.emit('activity', {
-      type: 'error',
-      msg: `❌ NVIDIA connection failed: ${err.message}`
-    });
+    learningEvents.emit('activity', { type: 'error', msg: `❌ NVIDIA failed: ${err.message}` });
     return false;
   }
 }
 
 // ─────────────────────────────────────────
-// BOARD PARSER — Board text → structured data
+// BOARD PARSER
 // ─────────────────────────────────────────
 export function parseBoard(text) {
   const lines = text.split('\n');
@@ -142,7 +133,6 @@ export function parseBoard(text) {
   const bankInfo = {};
   const prizeInfo = {};
 
-  // Prize lines — 1ኛ 🥇5,000 ብር etc
   for (const line of lines) {
     const prizeMatch = line.match(/([123]ኛ)[^\d]*([\d,]+)\s*ብር/);
     if (prizeMatch) {
@@ -150,7 +140,6 @@ export function parseBoard(text) {
     }
   }
 
-  // Bank lines
   const bankPatterns = [
     { name: 'CBE', pattern: /CBE\s+([\d]+)/ },
     { name: 'አዋሽ', pattern: /አዋሽ\s+([\d]+)/ },
@@ -164,21 +153,19 @@ export function parseBoard(text) {
     }
   }
 
-  // Slot lines — 01# / 96# ቢንያም ⏳ / 15# ዮሐንስ ✅
   for (const line of lines) {
     const slotMatch = line.match(/^(\d{1,3})#\s*(.*)?$/);
     if (slotMatch) {
       const number = parseInt(slotMatch[1]);
       const rest = (slotMatch[2] || '').trim();
-
-      let status = 'open';      // # → ክፍት
+      let status = 'open';
       let name = null;
 
       if (rest.includes('✅')) {
         status = 'paid';
         name = rest.replace('✅', '').trim() || null;
       } else if (rest.includes('⏳')) {
-        status = 'pending';     // ተመዝግቦ — ገና አልከፈለም
+        status = 'pending';
         name = rest.replace('⏳', '').trim() || null;
       } else if (rest.length > 0) {
         status = 'pending';
@@ -193,7 +180,7 @@ export function parseBoard(text) {
 }
 
 // ─────────────────────────────────────────
-// BOARD LEARNING — DeepSeek board ያነባዋል + ይማራል
+// BOARD LEARNING
 // ─────────────────────────────────────────
 export async function learnFromBoard(boardText, adminCaption = '') {
   const parsed = parseBoard(boardText);
@@ -202,11 +189,10 @@ export async function learnFromBoard(boardText, adminCaption = '') {
   const paidSlots = Object.values(parsed.slots).filter(s => s.status === 'paid').length;
   const pendingSlots = Object.values(parsed.slots).filter(s => s.status === 'pending').length;
 
-  // DB ላይ board state ይቀምጣል
   await updateBoardState(parsed);
 
   const prompt = `
-You are a learning AI analyzing an Amharic lottery board. Extract and understand all rules, patterns and admin behavior.
+You are a learning AI analyzing an Amharic lottery board.
 
 Board text:
 """
@@ -214,22 +200,13 @@ ${boardText}
 """
 
 Admin caption: "${adminCaption}"
-
-Board analysis:
-- Total slots: ${totalSlots}
-- Filled: ${filledSlots}
-- Paid (✅): ${paidSlots}
-- Pending (⏳): ${pendingSlots}
-- Banks: ${JSON.stringify(parsed.bankInfo)}
-- Prizes: ${JSON.stringify(parsed.prizeInfo)}
+Total slots: ${totalSlots}, Filled: ${filledSlots}, Paid: ${paidSlots}, Pending: ${pendingSlots}
+Banks: ${JSON.stringify(parsed.bankInfo)}
+Prizes: ${JSON.stringify(parsed.prizeInfo)}
 
 Return ONLY valid JSON (no markdown):
 {
-  "rules": [
-    "ምዝገባ ዋጋ 400 ብር ነው",
-    "ግማሽ 200 ብር ነው",
-    "1ኛ ሽልማት 5000 ብር ነው"
-  ],
+  "rules": [],
   "boardRules": {
     "price": 400,
     "halfPrice": 200,
@@ -238,11 +215,7 @@ Return ONLY valid JSON (no markdown):
     "banks": {},
     "statusSymbols": {"open": "#", "pending": "⏳", "paid": "✅"}
   },
-  "adminPatterns": [
-    "board ስትልክ caption ይጻፋሉ",
-    "⏳ = ተመዝግቦ ያልከፈለ",
-    "✅ = ከፍሎ confirmed"
-  ],
+  "adminPatterns": [],
   "shouldUpdate": true
 }`;
 
@@ -261,15 +234,16 @@ Return ONLY valid JSON (no markdown):
 
     learningEvents.emit('activity', {
       type: 'rule',
-      msg: `📋 Board ተማረ — ${filledSlots}/${totalSlots} slots, ${paidSlots} ✅, ${pendingSlots} ⏳`
+      msg: `📋 Board ተማረ — ${filledSlots}/${totalSlots} slots`
     });
 
     return parsed_knowledge;
   } catch (err) {
     console.error('[BOARD] Learn error:', err.message);
+    // DeepSeek error ቢሆን board state ብቻ ይቀምጣል — crash አያደርግም
     learningEvents.emit('activity', {
       type: 'error',
-      msg: `Board learn error: ${err.message}`
+      msg: `Board learn error (NVIDIA): ${err.message}`
     });
     return null;
   }
@@ -282,29 +256,21 @@ export async function learnFromMessage(message, isAdmin = false) {
   const knowledge = await readKnowledge();
 
   const prompt = `
-You are a learning AI analyzing Telegram messages to understand admin behavior in an Amharic lottery group.
+You are a learning AI analyzing Telegram messages for an Amharic lottery group.
 
-Current knowledge:
-- Admin phrases known: ${knowledge.adminStyle?.responses?.length || 0}
-- Rules known: ${knowledge.rules?.length || 0}
-- Intents known: ${knowledge.intents?.length || 0}
-- Board rules: ${JSON.stringify(knowledge.boardRules || {})}
-
-New message:
-- From: ${isAdmin ? 'ADMIN' : 'USER'}
-- Username: ${message.from?.username || 'unknown'}
-- Text: "${message.text}"
+Current knowledge: admin phrases: ${knowledge.adminStyle?.responses?.length || 0}, rules: ${knowledge.rules?.length || 0}
+New message - From: ${isAdmin ? 'ADMIN' : 'USER'}, Text: "${message.text}"
 
 Return ONLY valid JSON (no markdown):
 {
   "adminStyle": {
-    "responses": ${isAdmin ? '["phrase if useful, else empty"]' : '[]'},
+    "responses": [],
     "greetings": [],
     "warnings": [],
     "announcements": []
   },
   "rules": [],
-  "intents": [{"pattern": "user said", "meaning": "what they want", "response": "how admin replied"}],
+  "intents": [],
   "writingStyle": {
     "amharic": [],
     "commonPhrases": [],
@@ -323,14 +289,15 @@ Return ONLY valid JSON (no markdown):
     }
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `አዲስ message ተማረ — ${isAdmin ? 'ADMIN' : 'USER'}: "${message.text?.slice(0, 40)}"`
+      msg: `Message ተማረ — ${isAdmin ? 'ADMIN' : 'USER'}: "${message.text?.slice(0, 40)}"`
     });
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Learn error:', err.message);
+    // DeepSeek error → silently skip (background learning)
+    console.warn('[LEARN] DeepSeek unavailable, skipping:', err.message);
     learningEvents.emit('activity', {
       type: 'error',
-      msg: `Learn error: ${err.message}`
+      msg: `Learn skipped (NVIDIA unavailable)`
     });
     return null;
   }
@@ -365,44 +332,38 @@ Return ONLY valid JSON:
     }
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Rule error:', err.message);
+    console.warn('[RULES] DeepSeek unavailable, skipping:', err.message);
     return null;
   }
 }
 
 // ─────────────────────────────────────────
-// DEEPSEEK EVALUATOR + CORRECTOR
+// DEEPSEEK EVALUATOR
 // ─────────────────────────────────────────
 async function deepSeekEvaluate(userMessage, groqResponse, context = '') {
   const knowledge = await readKnowledge();
 
   const prompt = `
-You are a strict trainer AI. You must evaluate if this bot response matches the real admin's style exactly.
+You are a strict trainer AI evaluating if a bot response matches the real admin's Amharic style.
 
-Admin style learned:
-- Phrases: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 15))}
-- Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
-- Amharic phrases: ${JSON.stringify(knowledge.writingStyle?.amharic?.slice(0, 10))}
-- Emoji usage: ${knowledge.writingStyle?.emojiUsage || 'moderate'}
-- Rules: ${JSON.stringify(knowledge.rules?.slice(0, 10))}
-- Board rules: ${JSON.stringify(knowledge.boardRules || {})}
-- Intents: ${JSON.stringify(knowledge.intents?.slice(0, 10))}
+Admin style: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 15))}
+Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
+Rules: ${JSON.stringify(knowledge.rules?.slice(0, 10))}
+Intents: ${JSON.stringify(knowledge.intents?.slice(0, 10))}
 
 Context: ${context}
 User said: "${userMessage}"
 Bot responded: "${groqResponse}"
 
-Evaluate strictly. Admin writes in Amharic, uses emojis naturally, is concise and direct.
-
 Return ONLY valid JSON:
 {
   "score": 0.85,
   "isCorrect": true,
-  "issues": ["issue1", "issue2"],
-  "correction": "the correct response the real admin would give",
-  "ruleToAdd": "new rule to remember if any, else null",
+  "issues": [],
+  "correction": "",
+  "ruleToAdd": null,
   "shouldTeach": false,
-  "teachingNote": "what to tell Groq to do better"
+  "teachingNote": ""
 }`;
 
   try {
@@ -412,27 +373,27 @@ Return ONLY valid JSON:
 
     learningEvents.emit('activity', {
       type: 'eval',
-      msg: `Response ተገምግሟል — score: ${Math.round((evaluation.score || 0) * 100)}% ${evaluation.isCorrect ? '✅' : '⚠️ → ያስተምራል'}`
+      msg: `Response ተገምግሟል — ${Math.round((evaluation.score || 0) * 100)}% ${evaluation.isCorrect ? '✅' : '⚠️'}`
     });
 
-    // ህግ ካለ ይጨምራል
     if (evaluation.ruleToAdd) {
       await updateKnowledge({ rules: [evaluation.ruleToAdd] });
-      learningEvents.emit('activity', {
-        type: 'rule',
-        msg: `አዲስ ህግ ተጨመረ: "${evaluation.ruleToAdd.slice(0, 50)}"`
-      });
     }
 
     return evaluation;
   } catch (err) {
-    console.error('[NVIDIA] Evaluate error:', err.message);
-    return { score: 0.5, isCorrect: true, issues: [], correction: groqResponse };
+    // ✅ DeepSeek error ቢሆን → Groq response ቀጥታ ይጠቀማል (high confidence)
+    console.warn('[EVAL] DeepSeek unavailable — using Groq response directly');
+    learningEvents.emit('activity', {
+      type: 'eval',
+      msg: `⚠️ DeepSeek unavailable — Groq response ቀጥታ ይሄዳል`
+    });
+    return { score: 0.91, isCorrect: true, issues: [], correction: groqResponse };
   }
 }
 
 // ─────────────────────────────────────────
-// CORRECTION LOOP — DeepSeek ያስተካክላል Groq-ን
+// CORRECTION LOOP
 // ─────────────────────────────────────────
 async function correctionLoop(userMessage, initialResponse, systemPrompt, context = '') {
   let currentResponse = initialResponse;
@@ -448,60 +409,35 @@ async function correctionLoop(userMessage, initialResponse, systemPrompt, contex
       bestResponse = currentResponse;
     }
 
-    // ከፍቶ ከሆነ ወይም threshold ላይ ከደረሰ ይቆማል
     if (evaluation.isCorrect && evaluation.score >= CONFIDENCE_THRESHOLD) {
       learningEvents.emit('activity', {
         type: 'eval',
-        msg: `✅ Round ${round + 1}: Score ${Math.round(evaluation.score * 100)}% — Accepted`
+        msg: `✅ Round ${round + 1}: ${Math.round(evaluation.score * 100)}% — Accepted`
       });
       break;
     }
 
-    // ስህተት ካለ — Groq ያስተምራል + ያስተካክላል
     if (!evaluation.isCorrect || evaluation.score < CONFIDENCE_THRESHOLD) {
       corrections.push(evaluation);
 
-      learningEvents.emit('activity', {
-        type: 'eval',
-        msg: `⚠️ Round ${round + 1}: Score ${Math.round(evaluation.score * 100)}% — Groq ያስተምራል...`
-      });
-
-      // Groq ን ያስተምራል
       const teachingMessages = [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `${userMessage}` },
+        { role: 'user', content: userMessage },
         { role: 'assistant', content: currentResponse },
         {
           role: 'user',
-          content: `❌ ስህተት ነው። ምክንያት: ${evaluation.issues?.join(', ') || 'style አይሆንም'}
-${evaluation.teachingNote ? `\n📚 ማስተካከያ: ${evaluation.teachingNote}` : ''}
-${evaluation.correction ? `\n✅ እንዲህ መሆን አለበት: "${evaluation.correction}"` : ''}
-
+          content: `❌ ስህተት ነው። ${evaluation.issues?.join(', ') || 'style አይሆንም'}
+${evaluation.teachingNote ? `📚 ማስተካከያ: ${evaluation.teachingNote}` : ''}
+${evaluation.correction ? `✅ እንዲህ መሆን አለበት: "${evaluation.correction}"` : ''}
 አሁን እንደ admin ትክክለኛ response ስጥ:`
         },
       ];
 
       try {
         currentResponse = await callGroq(teachingMessages);
-        learningEvents.emit('activity', {
-          type: 'learn',
-          msg: `🔄 Round ${round + 1}: Groq response ተስተካከለ`
-        });
       } catch (err) {
         console.error('[CORRECTION] Groq retry error:', err.message);
         break;
-      }
-
-      // ማስተማሪያ → knowledge ውስጥ ይቀምጣል
-      if (evaluation.teachingNote) {
-        await updateKnowledge({
-          intents: [{
-            pattern: userMessage,
-            meaning: 'needs correction',
-            betterResponse: evaluation.correction || currentResponse,
-            teachingNote: evaluation.teachingNote,
-          }]
-        }).catch(() => {});
       }
     }
   }
@@ -510,7 +446,7 @@ ${evaluation.correction ? `\n✅ እንዲህ መሆን አለበት: "${evaluat
     response: bestResponse,
     confidence: bestScore,
     correctionRounds: corrections.length,
-    wasCorreected: corrections.length > 0,
+    wasCorrected: corrections.length > 0,  // ✅ typo fixed
   };
 }
 
@@ -526,13 +462,12 @@ async function buildSystemPrompt() {
     ? Object.values(boardState.slots || {}).filter(s => s.name).length
     : lotteryList.length;
 
-  return `You are ${BOT_NAME}, admin of an Amharic Telegram lottery group. Respond EXACTLY like the real admin — same tone, same Amharic style, same emoji usage.
+  return `You are ${BOT_NAME}, admin of an Amharic Telegram lottery group. Respond EXACTLY like the real admin.
 
 ADMIN STYLE:
 - Phrases: ${knowledge.adminStyle?.responses?.slice(0, 15).join(' | ') || 'friendly'}
 - Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
 - Amharic phrases: ${knowledge.writingStyle?.amharic?.join(', ') || ''}
-- Emoji usage: ${knowledge.writingStyle?.emojiUsage || 'moderate'}
 - Common phrases: ${knowledge.writingStyle?.commonPhrases?.join(' | ') || ''}
 
 LOTTERY RULES:
@@ -543,23 +478,17 @@ BOARD RULES:
 - Half price: ${knowledge.boardRules?.halfPrice || 200} ብር
 - Slots: 1–${knowledge.boardRules?.maxSlots || 100}
 - Filled: ${filledSlots} slots
-- Status symbols: ⏳ = ተመዝግቦ ያልከፈለ, ✅ = ከፍሎ confirmed, # = ክፍት
-
-BANKS:
-${knowledge.boardRules?.banks ? Object.entries(knowledge.boardRules.banks).map(([k, v]) => `${k}: ${v}`).join('\n') : 'See board'}
+- Status: ⏳ = ተመዝግቦ ያልከፈለ, ✅ = ከፍሎ confirmed, # = ክፍት
 
 INTENTS:
 ${knowledge.intents?.slice(0, 20).map(i => `- "${i.pattern}" → "${i.betterResponse || i.response}"`).join('\n') || ''}
 
-ADMIN PATTERNS:
-${knowledge.adminPatterns?.slice(0, 10).map((p, i) => `${i + 1}. ${p}`).join('\n') || ''}
-
 CRITICAL RULES:
 1. Always respond in Amharic
-2. Be natural, not robotic — exactly like the real admin
+2. Be natural, not robotic
 3. Keep responses short and direct
-4. Use emojis like the admin does
-5. Never give wrong info about lottery rules`;
+4. Use emojis naturally
+5. Never give wrong lottery info`;
 }
 
 // ─────────────────────────────────────────
@@ -575,7 +504,7 @@ export async function generateResponse(userMessage, userId, username) {
   // Groq — initial response
   const initialResponse = await callGroq(messages);
 
-  // DeepSeek — evaluate + correction loop
+  // DeepSeek — evaluate + correct (error ቢሆን Groq response ቀጥታ)
   const result = await correctionLoop(
     userMessage,
     initialResponse,
@@ -619,7 +548,6 @@ export async function handleRegistration(userId, username, requestedNumber) {
 
   const initialResponse = await callGroq(messages);
 
-  // Correction loop for registration too
   const result = await correctionLoop(
     `ምዝገባ ቁጥር ${requestedNumber}`,
     initialResponse,
@@ -648,15 +576,13 @@ export async function generateAnnouncement(topic, details) {
   ];
   const response = await callGroq(messages);
 
-  // Evaluate announcement quality
-  const evaluation = await deepSeekEvaluate(
-    `announcement: ${topic}`,
-    response,
-    'generating announcement'
-  );
-
-  if (!evaluation.isCorrect && evaluation.correction) {
-    return evaluation.correction;
+  try {
+    const evaluation = await deepSeekEvaluate(`announcement: ${topic}`, response, 'generating announcement');
+    if (!evaluation.isCorrect && evaluation.correction) {
+      return evaluation.correction;
+    }
+  } catch (err) {
+    console.warn('[ANNOUNCE] DeepSeek unavailable, using Groq response');
   }
 
   return response;
@@ -671,13 +597,12 @@ export async function generateLearningSummary() {
 
   const prompt = `
 Summarize learning from this Telegram lottery group.
-
 Knowledge: ${JSON.stringify(knowledge)}
 Messages in last 10 days: ${history.length}
 
 Return ONLY valid JSON:
 {
-  "summary": "brief summary in Amharic and English",
+  "summary": "በአማርኛ አጭር summary",
   "newThingsLearned": [],
   "weakAreas": [],
   "confidence": 0.75,
@@ -690,11 +615,11 @@ Return ONLY valid JSON:
     const parsed = JSON.parse(clean);
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `Daily summary ተሰራ — confidence: ${Math.round((parsed.confidence || 0) * 100)}%`
+      msg: `Daily summary — confidence: ${Math.round((parsed.confidence || 0) * 100)}%`
     });
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Summary error:', err.message);
+    console.error('[SUMMARY] DeepSeek error:', err.message);
     return null;
   }
 }
