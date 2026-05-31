@@ -5,9 +5,10 @@ import { getNextGroqKey, rotateGroqKey, getNextDeepSeekKey, rotateDeepSeekKey } 
 import {
   readKnowledge, updateKnowledge, getHistory,
   getLotteryList, getTokenUsage, addTokenUsage,
-  getBoardState, updateBoardState,
   saveActionLog, updateActionConfidence, getActionLogs,
   saveQAPair, updateQAConfidence, findSimilarQA, getBestQAPairs,
+  saveBoardEdit, getUnlearnedEdits, markEditLearned,
+  getBoardEdits, getDeletedMessages,
 } from './database.js';
 
 // ─────────────────────────────────────────
@@ -15,7 +16,6 @@ import {
 // ─────────────────────────────────────────
 export const learningEvents = new EventEmitter();
 
-const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
 const BOT_NAME = process.env.BOT_NAME || 'Admin';
 
 // ─────────────────────────────────────────
@@ -89,7 +89,7 @@ async function callGroq(messages, retries = 3) {
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('rate limit')) {
-        console.log(`[GROQ] Rate limit — key rotating... (attempt ${i + 1}/${retries})`);
+        console.log(`[GROQ] Rate limit — rotating... (attempt ${i + 1}/${retries})`);
         await new Promise(res => setTimeout(res, 2000));
         continue;
       }
@@ -135,97 +135,197 @@ export async function testNvidiaConnection() {
 }
 
 // ─────────────────────────────────────────
-// BOARD PARSER
+// LEARN FROM EDIT
+// Admin manually edit ሲያደርግ → DeepSeek ይማራል
+// before vs after ያወዳድራል — rule ያወጣል
 // ─────────────────────────────────────────
-export function parseBoard(text) {
-  const lines = text.split('\n');
-  const slots = {};
-  const bankInfo = {};
-  const prizeInfo = {};
+export async function learnFromEdit(messageId, beforeText, afterText) {
+  const prompt = `
+You are a learning AI for an Amharic lottery Telegram bot.
 
-  for (const line of lines) {
-    const prizeMatch = line.match(/([123]ኛ)[^\d]*([\d,]+)\s*ብር/);
-    if (prizeMatch) {
-      prizeInfo[prizeMatch[1]] = prizeMatch[2].replace(',', '');
+The admin just manually EDITED a message. Analyze what changed and why.
+
+Before edit:
+"""
+${beforeText || '(empty)'}
+"""
+
+After edit:
+"""
+${afterText || '(empty)'}
+"""
+
+Message ID: ${messageId}
+
+Analyze the difference:
+- What was added? (new name, status symbol like ✅ or ⏳, number, etc.)
+- What was removed? (name deleted = person left or didn't pay?)
+- What was changed? (⏳ → ✅ = payment confirmed?)
+
+Extract the rule the bot should learn.
+
+Return ONLY valid JSON:
+{
+  "changeType": "added_name | removed_name | status_changed | reposted | other",
+  "whatChanged": "brief description in Amharic",
+  "rule": "rule bot should follow next time",
+  "botAction": "what bot should do automatically next time",
+  "confidence": 0.9,
+  "shouldLearn": true
+}`;
+
+  try {
+    const response = await callDeepSeek(prompt);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (parsed.shouldLearn && parsed.rule) {
+      await updateKnowledge({ rules: [parsed.rule] });
+      await saveActionLog(
+        parsed.changeType || 'edit',
+        beforeText?.slice(0, 50) || '',
+        parsed.whatChanged || '',
+        { beforeText, afterText, botAction: parsed.botAction },
+        true
+      );
     }
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `✏️ Edit ተማረ — ${parsed.changeType}: "${parsed.whatChanged?.slice(0, 50)}"`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[EDIT] Learn error:', err.message);
+    return null;
   }
-
-  const bankPatterns = [
-    { name: 'CBE', pattern: /CBE\s+([\d]+)/ },
-    { name: 'አዋሽ', pattern: /አዋሽ\s+([\d]+)/ },
-    { name: 'ዳሽን', pattern: /ዳሽን\s+([\d]+)/ },
-    { name: 'ቴሌ', pattern: /ቴሌ ብር\s+([\d]+)/ },
-  ];
-  for (const line of lines) {
-    for (const b of bankPatterns) {
-      const m = line.match(b.pattern);
-      if (m) bankInfo[b.name] = m[1];
-    }
-  }
-
-  for (const line of lines) {
-    const slotMatch = line.match(/^(\d{1,3})#\s*(.*)?$/);
-    if (slotMatch) {
-      const number = parseInt(slotMatch[1]);
-      const rest = (slotMatch[2] || '').trim();
-
-      let status = 'open';
-      let name = null;
-
-      if (rest.includes('✅')) {
-        status = 'paid';
-        name = rest.replace('✅', '').trim() || null;
-      } else if (rest.includes('⏳')) {
-        status = 'pending';
-        name = rest.replace('⏳', '').trim() || null;
-      } else if (rest.length > 0) {
-        status = 'pending';
-        name = rest;
-      }
-
-      slots[number] = { number, name, status };
-    }
-  }
-
-  return { slots, bankInfo, prizeInfo, raw: text };
 }
 
 // ─────────────────────────────────────────
-// BOARD RENDERER
+// LEARN FROM DELETE
+// Admin message ሲሰርዝ → DeepSeek ይማራል
 // ─────────────────────────────────────────
-export function renderBoard(boardState, knowledge) {
-  const slots = boardState?.slots || {};
-  const rules = knowledge?.boardRules || {};
-  const price = rules.price || 400;
-  const halfPrice = rules.halfPrice || 200;
-  const prizes = rules.prizes || { '1st': 5000, '2nd': 1000, '3rd': 400 };
+export async function learnFromDelete(deletedText, context = '') {
+  const prompt = `
+You are a learning AI for an Amharic lottery Telegram bot.
 
-  let board = `በ ${price} ብር 5 ቁጥሮችን በተከታታይ በመያዝ እድሎን ይሞክሩ ለ 20 ሰው ብቻ ፈጣን ዕድል መልካም ዕድል\n\n`;
-  board += `መደብ 👉በ ${price} ብር\n`;
-  board += `       👉ግማሽ ${halfPrice} ብር\n\n`;
-  board += `1ኛ 🥇${prizes['1st']?.toLocaleString() || 5000} ብር\n`;
-  board += `2ኛ 🥈${prizes['2nd'] || 1000}\n`;
-  board += `3ኛ 🥇${prizes['3rd'] || 400}\n\n`;
+The admin just DELETED a message. Analyze why.
 
-  for (let i = 1; i <= 100; i++) {
-    const slot = slots[i];
-    let line = `${String(i).padStart(2, '0')}#`;
-    if (slot?.name) {
-      const statusEmoji = slot.status === 'paid' ? '✅' : '⏳';
-      line += ` ${slot.name} ${statusEmoji}`;
+Deleted message:
+"""
+${deletedText || '(unknown)'}
+"""
+
+Context: ${context}
+
+Why did admin delete this? Common reasons:
+- Board text became too long → delete + repost at bottom
+- Wrong info was sent → corrected
+- Outdated message → cleaned up
+
+Return ONLY valid JSON:
+{
+  "reason": "why admin deleted this",
+  "rule": "rule bot should follow",
+  "botAction": "what bot should do next time",
+  "confidence": 0.8,
+  "shouldLearn": true
+}`;
+
+  try {
+    const response = await callDeepSeek(prompt);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (parsed.shouldLearn && parsed.rule) {
+      await updateKnowledge({ rules: [parsed.rule] });
     }
-    board += line + '\n';
-    if (i % 5 === 0) board += '\n';
-  }
 
-  if (rules.banks) {
-    board += '\n';
-    for (const [bank, account] of Object.entries(rules.banks)) {
-      board += `${bank} ${account}\n`;
-    }
-  }
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `🗑️ Delete ተማረ — "${parsed.reason?.slice(0, 50)}"`
+    });
 
-  return board;
+    return parsed;
+  } catch (err) {
+    console.error('[DELETE] Learn error:', err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────
+// TRY BOT ACTION
+// Bot ተምሮ action ሊሞክር ሲፈልግ
+// Groq ይወስናል — ምን action ማድረግ አለበት?
+// ─────────────────────────────────────────
+export async function decideBotAction(userMessage, username, currentBoardText) {
+  const knowledge = await readKnowledge();
+  const actionLogs = await getActionLogs(0.7);
+  const edits = await getBoardEdits(20);
+  const deletions = await getDeletedMessages(10);
+
+  const systemPrompt = `
+You are an AI that decides what action a Telegram lottery bot should take.
+
+You have learned from watching the admin manually manage the board.
+
+Actions learned from admin edits:
+${edits.slice(0, 10).map(e =>
+  `- Changed: "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
+).join('\n') || 'None yet'}
+
+Actions learned from admin deletions:
+${deletions.slice(0, 5).map(d =>
+  `- Deleted: "${d.text?.slice(0, 30)}"`
+).join('\n') || 'None yet'}
+
+Rules learned:
+${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
+
+High confidence actions:
+${actionLogs.map(a =>
+  `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
+).join('\n') || 'None yet'}
+
+Current board:
+"""
+${currentBoardText || '(no board yet)'}
+"""
+
+User message: "@${username}: ${userMessage}"
+
+Decide what action to take. Return ONLY valid JSON:
+{
+  "action": "edit_board | delete_and_repost | respond_only | register_slot | confirm_payment | no_action",
+  "slotNumber": null,
+  "newName": null,
+  "newStatus": null,
+  "responseText": "Amharic response to send",
+  "reason": "why this action",
+  "confidence": 0.85,
+  "shouldAct": true
+}`;
+
+  try {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage },
+    ];
+    const response = await callGroq(messages);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    learningEvents.emit('activity', {
+      type: 'eval',
+      msg: `🤖 Bot action decided: ${parsed.action} (${Math.round((parsed.confidence || 0) * 100)}%)`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[ACTION] Decide error:', err.message);
+    return { action: 'respond_only', shouldAct: false, confidence: 0 };
+  }
 }
 
 // ─────────────────────────────────────────
@@ -239,11 +339,9 @@ export async function learnAction(actionType, trigger, reason, details = {}) {
 You are a learning AI. An admin just performed an action in a Telegram lottery group.
 
 Action: "${actionType}"
-Trigger (what caused it): "${trigger}"
+Trigger: "${trigger}"
 Reason: "${reason}"
 Details: ${JSON.stringify(details)}
-
-Extract the pattern — when should the bot do this action automatically?
 
 Return ONLY valid JSON:
 {
@@ -291,8 +389,6 @@ User said: "${userMessage}"
 Admin replied: "${adminReply}"
 Context: "${context}"
 
-Understand the intent and pattern.
-
 Return ONLY valid JSON:
 {
   "intent": "what user wanted",
@@ -329,84 +425,6 @@ Return ONLY valid JSON:
     return parsed;
   } catch (err) {
     console.error('[QA] Learn error:', err.message);
-    return null;
-  }
-}
-
-// ─────────────────────────────────────────
-// BOARD LEARNING
-// ─────────────────────────────────────────
-export async function learnFromBoard(boardText, adminCaption = '') {
-  const parsed = parseBoard(boardText);
-  const totalSlots = Object.keys(parsed.slots).length;
-  const filledSlots = Object.values(parsed.slots).filter(s => s.name).length;
-  const paidSlots = Object.values(parsed.slots).filter(s => s.status === 'paid').length;
-  const pendingSlots = Object.values(parsed.slots).filter(s => s.status === 'pending').length;
-
-  await updateBoardState(parsed);
-
-  if (adminCaption) {
-    await learnAction('board_sent', adminCaption, 'admin sent board to group', {
-      filledSlots,
-      paidSlots,
-      pendingSlots,
-    });
-  }
-
-  const prompt = `
-You are a learning AI analyzing an Amharic lottery board.
-
-Board text:
-"""
-${boardText}
-"""
-
-Admin caption: "${adminCaption}"
-
-Board analysis:
-- Total slots: ${totalSlots}
-- Filled: ${filledSlots}
-- Paid (✅): ${paidSlots}
-- Pending (⏳): ${pendingSlots}
-- Banks: ${JSON.stringify(parsed.bankInfo)}
-- Prizes: ${JSON.stringify(parsed.prizeInfo)}
-
-Return ONLY valid JSON (no markdown):
-{
-  "rules": [],
-  "boardRules": {
-    "price": 400,
-    "halfPrice": 200,
-    "maxSlots": 100,
-    "prizes": {"1st": 5000, "2nd": 1000, "3rd": 400},
-    "banks": {},
-    "statusSymbols": {"open": "#", "pending": "⏳", "paid": "✅"}
-  },
-  "adminPatterns": [],
-  "shouldUpdate": true
-}`;
-
-  try {
-    const response = await callDeepSeek(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed_knowledge = JSON.parse(clean);
-
-    if (parsed_knowledge.shouldUpdate) {
-      await updateKnowledge({
-        rules: parsed_knowledge.rules || [],
-        boardRules: parsed_knowledge.boardRules || {},
-        adminPatterns: parsed_knowledge.adminPatterns || [],
-      });
-    }
-
-    learningEvents.emit('activity', {
-      type: 'rule',
-      msg: `📋 Board ተማረ — ${filledSlots}/${totalSlots} slots, ${paidSlots} ✅`
-    });
-
-    return parsed_knowledge;
-  } catch (err) {
-    console.error('[BOARD] Learn error:', err.message);
     return null;
   }
 }
@@ -501,9 +519,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// DEEPSEEK BACKGROUND LEARNER
-// response ከተላከ በኋላ background ሆኖ ይሰራል
-// system prompt ያዘምናል ለሚቀጥለው ጊዜ
+// BACKGROUND LEARNER
 // ─────────────────────────────────────────
 async function deepSeekBackgroundLearn(userMessage, groqResponse, context = '') {
   const knowledge = await readKnowledge();
@@ -513,32 +529,25 @@ async function deepSeekBackgroundLearn(userMessage, groqResponse, context = '') 
   const prompt = `
 You are a background learning AI for an Amharic lottery Telegram bot.
 
-The bot just sent this response to a user. Analyze it and update knowledge
-so the bot responds BETTER next time.
-
 Admin style:
 - Phrases: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 15))}
 - Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
-- Amharic phrases: ${JSON.stringify(knowledge.writingStyle?.amharic?.slice(0, 10))}
 - Rules: ${JSON.stringify(knowledge.rules?.slice(0, 10))}
 
-Best Q&A pairs learned from admin:
+Best Q&A pairs:
 ${bestPairs.slice(0, 10).map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n')}
-
-Actions learned:
-${actionLogs.slice(0, 5).map(a => `${a.action_type}: ${a.reason}`).join('\n')}
 
 Context: ${context}
 User said: "${userMessage}"
 Bot responded: "${groqResponse}"
 
-Analyze and return ONLY valid JSON with improvements for next time:
+Return ONLY valid JSON:
 {
   "ruleToAdd": "rule to improve future responses, or null",
   "intentToUpdate": {
     "pattern": "${userMessage}",
     "meaning": "what user wanted",
-    "betterResponse": "improved response for next time or null"
+    "betterResponse": "improved response or null"
   },
   "styleNote": "style improvement note or null"
 }`;
@@ -549,22 +558,13 @@ Analyze and return ONLY valid JSON with improvements for next time:
     const parsed = JSON.parse(clean);
 
     const updates = {};
-
-    if (parsed.ruleToAdd) {
-      updates.rules = [parsed.ruleToAdd];
-    }
-
-    if (parsed.intentToUpdate?.betterResponse) {
-      updates.intents = [parsed.intentToUpdate];
-    }
-
-    if (Object.keys(updates).length > 0) {
-      await updateKnowledge(updates);
-    }
+    if (parsed.ruleToAdd) updates.rules = [parsed.ruleToAdd];
+    if (parsed.intentToUpdate?.betterResponse) updates.intents = [parsed.intentToUpdate];
+    if (Object.keys(updates).length > 0) await updateKnowledge(updates);
 
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `🧠 Background learning ተጠናቀቀ — "${userMessage.slice(0, 30)}"`
+      msg: `🧠 Background learning — "${userMessage.slice(0, 30)}"`
     });
 
     return parsed;
@@ -577,16 +577,12 @@ Analyze and return ONLY valid JSON with improvements for next time:
 // ─────────────────────────────────────────
 // SYSTEM PROMPT BUILDER
 // ─────────────────────────────────────────
-async function buildSystemPrompt() {
+async function buildSystemPrompt(currentBoardText = '') {
   const knowledge = await readKnowledge();
   const lotteryList = await getLotteryList();
-  const boardState = await getBoardState().catch(() => null);
   const bestPairs = await getBestQAPairs(20);
   const actionLogs = await getActionLogs(0.6);
-
-  const filledSlots = boardState
-    ? Object.values(boardState.slots || {}).filter(s => s.name).length
-    : lotteryList.length;
+  const edits = await getBoardEdits(10);
 
   return `You are ${BOT_NAME}, admin of an Amharic Telegram lottery group. Respond EXACTLY like the real admin.
 
@@ -599,21 +595,27 @@ ADMIN STYLE:
 LOTTERY RULES:
 ${knowledge.rules?.map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No rules yet'}
 
-BOARD RULES:
-- Price: ${knowledge.boardRules?.price || 400} ብር
-- Half price: ${knowledge.boardRules?.halfPrice || 200} ብር
-- Slots: 1–${knowledge.boardRules?.maxSlots || 100}
-- Filled: ${filledSlots}/100
-- Status: ⏳ = ተመዝግቦ ያልከፈለ, ✅ = ከፍሎ confirmed, # = ክፍት
+REGISTERED MEMBERS: ${lotteryList.length}/100
 
-REAL Q&A PAIRS (from admin — use these as guide):
-${bestPairs.map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n') || 'None yet'}
+WHAT I LEARNED FROM ADMIN EDITS:
+${edits.slice(0, 8).map(e =>
+  `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
+).join('\n') || 'None yet'}
 
 ACTIONS LEARNED:
-${actionLogs.map(a => `- ${a.action_type}: ${a.reason} (confidence: ${Math.round(a.confidence * 100)}%)`).join('\n') || 'None yet'}
+${actionLogs.map(a =>
+  `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
+).join('\n') || 'None yet'}
+
+REAL Q&A PAIRS:
+${bestPairs.map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n') || 'None yet'}
 
 INTENTS:
-${knowledge.intents?.slice(0, 20).map(i => `- "${i.pattern}" → "${i.betterResponse || i.response}"`).join('\n') || ''}
+${knowledge.intents?.slice(0, 20).map(i =>
+  `- "${i.pattern}" → "${i.betterResponse || i.response}"`
+).join('\n') || ''}
+
+${currentBoardText ? `CURRENT BOARD:\n${currentBoardText}` : ''}
 
 CRITICAL:
 1. Always respond in Amharic
@@ -624,14 +626,10 @@ CRITICAL:
 }
 
 // ─────────────────────────────────────────
-// GENERATE RESPONSE (main)
-// Groq = 1 call → group ይላካል
-// DeepSeek = background ሆኖ ይማራል
+// GENERATE RESPONSE
 // ─────────────────────────────────────────
-export async function generateResponse(userMessage, userId, username) {
-  const systemPrompt = await buildSystemPrompt();
-
-  // Exact match ካለ ቀጥታ ይመልሳል
+export async function generateResponse(userMessage, userId, username, currentBoardText = '') {
+  // Exact match check
   const similarPairs = await findSimilarQA(userMessage, 3);
   const exactMatch = similarPairs.find(p =>
     p.user_message === userMessage && p.confidence >= 0.9
@@ -640,17 +638,16 @@ export async function generateResponse(userMessage, userId, username) {
   if (exactMatch) {
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `🎯 Exact Q&A match — confidence: ${Math.round(exactMatch.confidence * 100)}%`
+      msg: `🎯 Exact Q&A match — ${Math.round(exactMatch.confidence * 100)}%`
     });
     return {
       response: exactMatch.admin_reply,
       confidence: exactMatch.confidence,
-      needsAdminApproval: false,
       fromCache: true,
     };
   }
 
-  // Groq — 1 call ብቻ
+  const systemPrompt = await buildSystemPrompt(currentBoardText);
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `${username}: ${userMessage}` },
@@ -658,7 +655,6 @@ export async function generateResponse(userMessage, userId, username) {
 
   const response = await callGroq(messages);
 
-  // DeepSeek background ሆኖ ይማራል — response ላካ በኋላ
   setImmediate(() => {
     deepSeekBackgroundLearn(userMessage, response, `User: ${username}`)
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
@@ -667,7 +663,7 @@ export async function generateResponse(userMessage, userId, username) {
   return {
     response,
     confidence: 1.0,
-    needsAdminApproval: false,
+    fromCache: false,
   };
 }
 
@@ -696,10 +692,8 @@ export async function handleRegistration(userId, username, requestedNumber) {
     },
   ];
 
-  // Groq — 1 call ብቻ
   const response = await callGroq(messages);
 
-  // DeepSeek background ሆኖ ይማራል
   setImmediate(() => {
     deepSeekBackgroundLearn(
       `ምዝገባ ቁጥር ${requestedNumber}`,
@@ -729,9 +723,8 @@ export async function generateAnnouncement(topic, details) {
   ];
   const response = await callGroq(messages);
 
-  // DeepSeek background ሆኖ ይማራል
   setImmediate(() => {
-    deepSeekBackgroundLearn(`announcement: ${topic}`, response, 'generating announcement')
+    deepSeekBackgroundLearn(`announcement: ${topic}`, response, 'announcement')
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
   });
 
@@ -746,6 +739,8 @@ export async function generateLearningSummary() {
   const history = await getHistory(7);
   const actionLogs = await getActionLogs(0.0);
   const bestPairs = await getBestQAPairs(10);
+  const edits = await getBoardEdits(20);
+  const deletions = await getDeletedMessages(10);
 
   const prompt = `
 Summarize learning from this Telegram lottery group.
@@ -754,6 +749,8 @@ Knowledge: ${JSON.stringify(knowledge)}
 Messages in last 7 days: ${history.length}
 Actions learned: ${actionLogs.length}
 Q&A pairs: ${bestPairs.length}
+Board edits learned: ${edits.length}
+Deleted messages learned: ${deletions.length}
 
 Return ONLY valid JSON:
 {
@@ -770,7 +767,7 @@ Return ONLY valid JSON:
     const parsed = JSON.parse(clean);
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `📊 Summary — confidence: ${Math.round((parsed.confidence || 0) * 100)}%`
+      msg: `📊 Summary — ${Math.round((parsed.confidence || 0) * 100)}%`
     });
     return parsed;
   } catch (err) {
@@ -780,17 +777,13 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// 📦 BATCH LEARNING SYSTEM
-// 50 messages ወይም 10 minutes → አንድ DeepSeek call
+// BATCH LEARNING SYSTEM
 // ─────────────────────────────────────────
-
 const messageBuffer = [];
 const BATCH_SIZE = 50;
-const BATCH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const BATCH_INTERVAL_MS = 10 * 60 * 1000;
 let batchTimer = null;
 const miniSummaries = [];
-
-// ዕለታዊ Q&A exchanges
 const dailyExchanges = [];
 
 export function addToBuffer(msg, isAdmin, groqResponse = null) {
@@ -801,7 +794,6 @@ export function addToBuffer(msg, isAdmin, groqResponse = null) {
     timestamp: Date.now(),
   });
 
-  // Q&A exchange ካለ daily buffer ውስጥ ያስቀምጣል
   if (!isAdmin && groqResponse) {
     dailyExchanges.push({
       user: msg.text || '',
@@ -812,7 +804,7 @@ export function addToBuffer(msg, isAdmin, groqResponse = null) {
 
   learningEvents.emit('activity', {
     type: 'learn',
-    msg: `📥 Buffer: ${messageBuffer.length}/${BATCH_SIZE} messages`
+    msg: `📥 Buffer: ${messageBuffer.length}/${BATCH_SIZE}`
   });
 
   if (messageBuffer.length >= BATCH_SIZE) {
@@ -850,23 +842,13 @@ async function processBatch() {
   const prompt = `
 You are a learning AI for an Amharic Telegram lottery group bot.
 
-Analyze this batch of ${batch.length} messages and extract ALL learning patterns.
+Analyze this batch of ${batch.length} messages.
 
 ADMIN messages (${adminMessages.length}):
 ${adminMessages.map((m, i) => `${i + 1}. "${m}"`).join('\n') || 'None'}
 
-USER messages with BOT responses (${qaExchanges.length}):
+USER + BOT exchanges (${qaExchanges.length}):
 ${qaExchanges.join('\n') || 'None'}
-
-USER messages without response (${userMessages.filter(m => !m.groqResponse).length}):
-${userMessages.filter(m => !m.groqResponse).map((m, i) => `${i + 1}. "${m.text}"`).join('\n') || 'None'}
-
-Extract:
-1. Admin style patterns (phrases, tone, emojis)
-2. Common user questions and their patterns
-3. Lottery rules mentioned
-4. Registration patterns
-5. Board/payment patterns
 
 Return ONLY valid JSON:
 {
@@ -877,15 +859,13 @@ Return ONLY valid JSON:
     "tone": ""
   },
   "rules": [],
-  "intents": [
-    {"pattern": "", "meaning": "", "response": ""}
-  ],
+  "intents": [{"pattern": "", "meaning": "", "response": ""}],
   "writingStyle": {
     "amharic": [],
     "commonPhrases": [],
     "emojiUsage": ""
   },
-  "miniSummary": "brief summary of what was learned in Amharic",
+  "miniSummary": "brief summary in Amharic",
   "topPatterns": [],
   "shouldUpdate": true
 }`;
@@ -937,6 +917,8 @@ export async function deepNightLearning() {
   const knowledge = await readKnowledge();
   const history = await getHistory(1);
   const bestPairs = await getBestQAPairs(20);
+  const edits = await getBoardEdits(50);
+  const deletions = await getDeletedMessages(20);
 
   const summariesToProcess = [...miniSummaries];
   miniSummaries.length = 0;
@@ -946,36 +928,28 @@ export async function deepNightLearning() {
   const prompt = `
 You are a deep learning AI for an Amharic lottery Telegram bot.
 
-It's the end of the day. Do a DEEP analysis of everything learned today.
+End of day deep analysis.
 
-Mini summaries from today's batches (${summariesToProcess.length} batches):
-${summariesToProcess.map((s, i) => `
-Batch ${i + 1} (${s.time}):
-- Summary: ${s.summary}
-- Patterns: ${s.patterns.join(', ')}
-- Messages: ${s.messageCount}
-`).join('\n')}
+Mini summaries (${summariesToProcess.length} batches):
+${summariesToProcess.map((s, i) => `Batch ${i+1}: ${s.summary} (${s.messageCount} msgs)`).join('\n')}
 
-Current knowledge state:
+Board edits learned today (${edits.length}):
+${edits.slice(0, 20).map(e =>
+  `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
+).join('\n') || 'None'}
+
+Deletions learned today (${deletions.length}):
+${deletions.slice(0, 10).map(d => `- "${d.text?.slice(0, 40)}"`).join('\n') || 'None'}
+
+Current knowledge:
 - Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
 - Rules: ${knowledge.rules?.length || 0}
-- Intents: ${knowledge.intents?.length || 0}
 - Confidence: ${Math.round((knowledge.confidence || 0) * 100)}%
 
-Best Q&A pairs learned:
-${bestPairs.slice(0, 10).map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n')}
-
-Today's Q&A exchanges (bot responses to review):
-${exchangesToReview.slice(0, 100).map((e, i) => `${i+1}. User: "${e.user}" → Bot: "${e.bot}"`).join('\n') || 'None'}
-
-Today's message count: ${history.length}
-
-Tasks:
-1. Consolidate all patterns — remove duplicates
-2. Strengthen high-frequency patterns
-3. Identify gaps — what questions can't bot answer yet?
-4. Calculate new confidence score
-5. Write detailed Amharic summary
+Today's Q&A exchanges:
+${exchangesToReview.slice(0, 50).map((e, i) =>
+  `${i+1}. User: "${e.user}" → Bot: "${e.bot}"`
+).join('\n') || 'None'}
 
 Return ONLY valid JSON:
 {
@@ -986,7 +960,7 @@ Return ONLY valid JSON:
   "gaps": [],
   "newConfidence": 0.85,
   "readyToReplace": false,
-  "dailySummary": "ዛሬ ምን ተማርኩ — Amharic detailed summary",
+  "dailySummary": "ዛሬ ምን ተማርኩ — Amharic summary",
   "improvements": [],
   "totalPatternsLearned": 0
 }`;
@@ -1008,7 +982,7 @@ Return ONLY valid JSON:
 
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `🌙 Deep Learning ተጠናቀቀ! Confidence: ${Math.round((parsed.newConfidence || 0) * 100)}% — ${parsed.totalPatternsLearned} patterns`
+      msg: `🌙 Deep Learning ተጠናቀቀ! ${Math.round((parsed.newConfidence || 0) * 100)}% — ${parsed.totalPatternsLearned} patterns`
     });
 
     return parsed;
@@ -1022,58 +996,26 @@ Return ONLY valid JSON:
 // ⭐ LEARN FROM RATING
 // ─────────────────────────────────────────
 export async function learnFromRating(userText, botResponse, score) {
-  const RATING_LABELS = {
-    1: '👎 ዝቅተኛ',
-    2: '😐 መካከለኛ',
-    3: '👍 አሪፍ',
-    4: '🔥 በጣም አሪፍ',
-  };
-
+  const RATING_LABELS = { 1: '👎 ዝቅተኛ', 2: '😐 መካከለኛ', 3: '👍 አሪፍ', 4: '🔥 በጣም አሪፍ' };
   const label = RATING_LABELS[score] || '?';
   const isGood = score >= 3;
   const isExcellent = score === 4;
   const isBad = score === 1;
 
   const prompt = `
-You are a learning AI for an Amharic lottery Telegram bot.
+Amharic lottery bot response rating:
 
-The admin just rated this bot response:
-
-User asked: "${userText}"
-Bot responded: "${botResponse}"
-Admin rating: ${score}/4 — ${label}
-
-${isExcellent ? `
-This is EXCELLENT (4/4). 
-- Save this as a perfect response pattern
-- Bot should respond EXACTLY like this next time
-- Increase confidence for this pattern` : ''}
-
-${score === 3 ? `
-This is GOOD (3/4).
-- This response works well
-- Minor improvements possible
-- Keep this pattern` : ''}
-
-${score === 2 ? `
-This is AVERAGE (2/4).
-- Response is acceptable but not great
-- Try to improve style next time
-- Note what could be better` : ''}
-
-${isBad ? `
-This is BAD (1/4).
-- This response was WRONG or poor quality
-- Bot should NOT respond like this
-- Learn what went wrong` : ''}
+User: "${userText}"
+Bot: "${botResponse}"
+Rating: ${score}/4 — ${label}
 
 Return ONLY valid JSON:
 {
-  "ruleToAdd": "rule to remember based on this rating",
+  "ruleToAdd": "rule or null",
   "pattern": ${JSON.stringify(userText)},
   "goodResponse": ${isGood ? JSON.stringify(botResponse) : 'null'},
   "badResponse": ${isBad ? JSON.stringify(botResponse) : 'null'},
-  "improvement": "how to improve if rating < 3, else null",
+  "improvement": ${!isGood ? '"how to improve"' : 'null'},
   "confidenceChange": ${score === 4 ? 0.3 : score === 3 ? 0.1 : score === 2 ? 0 : -0.2},
   "saveAsExample": ${isExcellent}
 }`;
@@ -1084,11 +1026,7 @@ Return ONLY valid JSON:
     const parsed = JSON.parse(clean);
 
     const updates = {};
-
-    if (parsed.ruleToAdd) {
-      updates.rules = [parsed.ruleToAdd];
-    }
-
+    if (parsed.ruleToAdd) updates.rules = [parsed.ruleToAdd];
     if (isExcellent && parsed.goodResponse) {
       updates.intents = [{
         pattern: userText,
@@ -1100,7 +1038,6 @@ Return ONLY valid JSON:
       }];
       updates.adminStyle = { responses: [parsed.goodResponse] };
     }
-
     if (score === 3 && parsed.goodResponse) {
       updates.intents = [{
         pattern: userText,
@@ -1110,22 +1047,18 @@ Return ONLY valid JSON:
         rating: 3,
       }];
     }
-
     if (isBad) {
       updates.rules = [
-        `Avoid responding like "${botResponse.slice(0, 50)}" when user says "${userText.slice(0, 50)}" — find a better response`,
+        `Avoid: "${botResponse.slice(0, 50)}" when user says "${userText.slice(0, 50)}"`
       ];
     }
 
-    if (Object.keys(updates).length > 0) {
-      await updateKnowledge(updates);
-    }
-
+    if (Object.keys(updates).length > 0) await updateKnowledge(updates);
     await updateQAConfidence(userText, isGood, parsed.confidenceChange || 0).catch(() => {});
 
     learningEvents.emit('activity', {
       type: isGood ? 'learn' : 'eval',
-      msg: `⭐ Rating ${score}/4 (${label}) — "${userText.slice(0, 30)}" — DeepSeek ተማረ`
+      msg: `⭐ Rating ${score}/4 (${label}) — "${userText.slice(0, 30)}"`
     });
 
     return parsed;
