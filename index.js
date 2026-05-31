@@ -10,7 +10,7 @@ import {
 import {
   learnFromMessage, learnLotteryRules, generateLearningSummary,
   learningEvents, getTokenStats, testNvidiaConnection,
-  learnFromBoard, parseBoard,
+  learnFromBoard, parseBoard, renderBoard,
 } from './aiService.js';
 import { generateResponse, handleRegistration, generateAnnouncement } from './aiService.js';
 import { getKeyStats } from './keys.js';
@@ -36,50 +36,6 @@ async function alertAdmin(bot, message, level = 'INFO') {
   } catch (err) {
     console.error('[ALERT] Failed:', err.message);
   }
-}
-
-// ─────────────────────────────────────────
-// BOARD RENDERER — DB state → text board
-// ─────────────────────────────────────────
-function renderBoard(boardState, knowledge) {
-  const slots = boardState?.slots || {};
-  const rules = knowledge?.boardRules || {};
-  const price = rules.price || 400;
-  const halfPrice = rules.halfPrice || 200;
-  const prizes = rules.prizes || { '1st': 5000, '2nd': 1000, '3rd': 400 };
-
-  let board = `በ ${price} ብር 5 ቁጥሮችን በተከታታይ በመያዝ እድሎን ይሞክሩ ለ 20 ሰው ብቻ ፈጣን ዕድል መልካም ዕድል\n\n`;
-  board += `መደብ 👉በ ${price} ብር\n`;
-  board += `       👉ግማሽ ${halfPrice} ብር\n\n`;
-  board += `1ኛ 🥇${prizes['1st']?.toLocaleString() || 5000} ብር\n`;
-  board += `2ኛ 🥈${prizes['2nd'] || 1000}\n`;
-  board += `3ኛ 🥇${prizes['3rd'] || 400}\n\n`;
-
-  // ቁጥሮቹ 1-100 — groups of 5
-  for (let i = 1; i <= 100; i++) {
-    const slot = slots[i];
-    let line = `${String(i).padStart(2, '0')}#`;
-
-    if (slot?.name) {
-      const statusEmoji = slot.status === 'paid' ? '✅' : '⏳';
-      line += ` ${slot.name} ${statusEmoji}`;
-    }
-
-    board += line + '\n';
-
-    // ክፍት ያለ blank line after every 5
-    if (i % 5 === 0) board += '\n';
-  }
-
-  // Banks
-  if (rules.banks) {
-    board += '\n';
-    for (const [bank, account] of Object.entries(rules.banks)) {
-      board += `${bank} ${account}\n`;
-    }
-  }
-
-  return board;
 }
 
 // ─────────────────────────────────────────
