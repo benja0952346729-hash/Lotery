@@ -74,6 +74,17 @@ async function handleAdminCommand(bot, msg) {
     return;
   }
 
+  if (text.startsWith('/threshold ')) {
+    const value = parseFloat(text.replace('/threshold ', ''));
+    if (isNaN(value) || value < 0 || value > 1) {
+      await bot.sendMessage(chatId, '❌ 0 እና 1 መካከል ስጥ\nምሳሌ: /threshold 0.5');
+      return;
+    }
+    CONFIDENCE_THRESHOLD = value;
+    await bot.sendMessage(chatId, `✅ Threshold → ${Math.round(value * 100)}%`);
+    return;
+  }
+
   // ── STATUS ──
   if (text === '/status') {
     const isOn = await getBotState();
@@ -334,6 +345,7 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
 ━━━━━━━━━━━━━━
 /on — Bot ያብራ
 /off — Bot ያጥፋ
+/threshold <0-1> — Confidence threshold ቀይር
 /ratingon — Rating ያብራ ⭐
 /ratingoff — Rating ያጥፋ 🔕
 /status — Bot status
@@ -356,7 +368,7 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
 // 👥 GROUP HANDLER
 // ============================================================
 
-const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
+let CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.50');
 
 async function handleGroupMessage(bot, msg) {
   const text = msg.text || '';
