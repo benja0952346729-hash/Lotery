@@ -17,7 +17,6 @@ export const learningEvents = new EventEmitter();
 
 const CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.90');
 const BOT_NAME = process.env.BOT_NAME || 'Admin';
-const MAX_CORRECTION_ROUNDS = 3;
 
 // ─────────────────────────────────────────
 // TOKEN TRACKER
@@ -92,6 +91,7 @@ async function callGroq(messages, retries = 3) {
       if (err.status === 429 || err.message?.includes('rate limit')) {
         console.log('[GROQ] Rate limit — rotating key...');
         rotateGroqKey();
+        await new Promise(res => setTimeout(res, 2000));
         continue;
       }
       throw err;
@@ -264,7 +264,6 @@ Return ONLY valid JSON:
       await updateKnowledge({ rules: [parsed.rule] });
     }
 
-    // Action confidence ያዘምናል
     await updateActionConfidence(actionType, trigger, parsed.confidence ?? 0.8).catch(() => {});
 
     learningEvents.emit('activity', {
@@ -503,23 +502,26 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// DEEPSEEK EVALUATOR + CORRECTOR
+// DEEPSEEK BACKGROUND LEARNER
+// response ከተላከ በኋላ background ሆኖ ይሰራል
+// system prompt ያዘምናል ለሚቀጥለው ጊዜ
 // ─────────────────────────────────────────
-async function deepSeekEvaluate(userMessage, groqResponse, context = '') {
+async function deepSeekBackgroundLearn(userMessage, groqResponse, context = '') {
   const knowledge = await readKnowledge();
   const bestPairs = await getBestQAPairs(15);
   const actionLogs = await getActionLogs(0.7);
 
   const prompt = `
-You are a strict trainer AI. Evaluate if this bot response matches the real admin's style.
+You are a background learning AI for an Amharic lottery Telegram bot.
+
+The bot just sent this response to a user. Analyze it and update knowledge
+so the bot responds BETTER next time.
 
 Admin style:
 - Phrases: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 15))}
 - Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
 - Amharic phrases: ${JSON.stringify(knowledge.writingStyle?.amharic?.slice(0, 10))}
 - Rules: ${JSON.stringify(knowledge.rules?.slice(0, 10))}
-- Board rules: ${JSON.stringify(knowledge.boardRules || {})}
-- Intents: ${JSON.stringify(knowledge.intents?.slice(0, 10))}
 
 Best Q&A pairs learned from admin:
 ${bestPairs.slice(0, 10).map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n')}
@@ -531,112 +533,46 @@ Context: ${context}
 User said: "${userMessage}"
 Bot responded: "${groqResponse}"
 
-Return ONLY valid JSON:
+Analyze and return ONLY valid JSON with improvements for next time:
 {
-  "score": 0.85,
-  "isCorrect": true,
-  "issues": [],
-  "correction": "correct response",
-  "ruleToAdd": null,
-  "shouldTeach": false,
-  "teachingNote": ""
+  "ruleToAdd": "rule to improve future responses, or null",
+  "intentToUpdate": {
+    "pattern": "${userMessage}",
+    "meaning": "what user wanted",
+    "betterResponse": "improved response for next time or null"
+  },
+  "styleNote": "style improvement note or null"
 }`;
 
   try {
     const response = await callDeepSeek(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
-    const evaluation = JSON.parse(clean);
+    const parsed = JSON.parse(clean);
+
+    const updates = {};
+
+    if (parsed.ruleToAdd) {
+      updates.rules = [parsed.ruleToAdd];
+    }
+
+    if (parsed.intentToUpdate?.betterResponse) {
+      updates.intents = [parsed.intentToUpdate];
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await updateKnowledge(updates);
+    }
 
     learningEvents.emit('activity', {
-      type: 'eval',
-      msg: `📊 Score: ${Math.round((evaluation.score || 0) * 100)}% ${evaluation.isCorrect ? '✅' : '⚠️'}`
+      type: 'learn',
+      msg: `🧠 Background learning ተጠናቀቀ — "${userMessage.slice(0, 30)}"`
     });
 
-    if (evaluation.ruleToAdd) {
-      await updateKnowledge({ rules: [evaluation.ruleToAdd] });
-    }
-
-    await updateQAConfidence(userMessage, evaluation.isCorrect).catch(() => {});
-
-    return evaluation;
+    return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Evaluate error:', err.message);
-    return { score: 0.5, isCorrect: true, issues: [], correction: groqResponse };
+    console.error('[BACKGROUND] Learn error:', err.message);
+    return null;
   }
-}
-
-// ─────────────────────────────────────────
-// CORRECTION LOOP
-// ─────────────────────────────────────────
-async function correctionLoop(userMessage, initialResponse, systemPrompt, context = '') {
-  let currentResponse = initialResponse;
-  let bestScore = 0;
-  let bestResponse = initialResponse;
-  const corrections = [];
-
-  for (let round = 0; round < MAX_CORRECTION_ROUNDS; round++) {
-    const evaluation = await deepSeekEvaluate(userMessage, currentResponse, context);
-
-    if (evaluation.score > bestScore) {
-      bestScore = evaluation.score;
-      bestResponse = currentResponse;
-    }
-
-    if (evaluation.isCorrect && evaluation.score >= CONFIDENCE_THRESHOLD) {
-      learningEvents.emit('activity', {
-        type: 'eval',
-        msg: `✅ Round ${round + 1}: ${Math.round(evaluation.score * 100)}% — Accepted`
-      });
-      break;
-    }
-
-    if (!evaluation.isCorrect || evaluation.score < CONFIDENCE_THRESHOLD) {
-      corrections.push(evaluation);
-
-      const teachingMessages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-        { role: 'assistant', content: currentResponse },
-        {
-          role: 'user',
-          content: `❌ ስህተት ነው። ምክንያት: ${evaluation.issues?.join(', ') || 'style አይሆንም'}
-${evaluation.teachingNote ? `\n📚 ማስተካከያ: ${evaluation.teachingNote}` : ''}
-${evaluation.correction ? `\n✅ እንዲህ መሆን አለበት: "${evaluation.correction}"` : ''}
-
-አሁን እንደ admin ትክክለኛ response ስጥ:`
-        },
-      ];
-
-      try {
-        currentResponse = await callGroq(teachingMessages);
-        learningEvents.emit('activity', {
-          type: 'learn',
-          msg: `🔄 Round ${round + 1}: Groq ተስተካከለ`
-        });
-      } catch (err) {
-        console.error('[CORRECTION] Error:', err.message);
-        break;
-      }
-
-      if (evaluation.teachingNote) {
-        await updateKnowledge({
-          intents: [{
-            pattern: userMessage,
-            meaning: 'needs correction',
-            betterResponse: evaluation.correction || currentResponse,
-            teachingNote: evaluation.teachingNote,
-          }]
-        }).catch(() => {});
-      }
-    }
-  }
-
-  return {
-    response: bestResponse,
-    confidence: bestScore,
-    correctionRounds: corrections.length,
-    wasCorrected: corrections.length > 0,
-  };
 }
 
 // ─────────────────────────────────────────
@@ -690,10 +626,13 @@ CRITICAL:
 
 // ─────────────────────────────────────────
 // GENERATE RESPONSE (main)
+// Groq = 1 call → group ይላካል
+// DeepSeek = background ሆኖ ይማራል
 // ─────────────────────────────────────────
 export async function generateResponse(userMessage, userId, username) {
   const systemPrompt = await buildSystemPrompt();
 
+  // Exact match ካለ ቀጥታ ይመልሳል
   const similarPairs = await findSimilarQA(userMessage, 3);
   const exactMatch = similarPairs.find(p =>
     p.user_message === userMessage && p.confidence >= 0.9
@@ -712,26 +651,24 @@ export async function generateResponse(userMessage, userId, username) {
     };
   }
 
+  // Groq — 1 call ብቻ
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `${username}: ${userMessage}` },
   ];
 
-  const initialResponse = await callGroq(messages);
+  const response = await callGroq(messages);
 
-  const result = await correctionLoop(
-    userMessage,
-    initialResponse,
-    systemPrompt,
-    `User: ${username}`
-  );
+  // DeepSeek background ሆኖ ይማራል — response ላካ በኋላ
+  setImmediate(() => {
+    deepSeekBackgroundLearn(userMessage, response, `User: ${username}`)
+      .catch(err => console.error('[BACKGROUND] Error:', err.message));
+  });
 
   return {
-    response: result.response,
-    confidence: result.confidence,
-    needsAdminApproval: result.confidence < CONFIDENCE_THRESHOLD,
-    correctionRounds: result.correctionRounds,
-    wasCorrected: result.wasCorrected,
+    response,
+    confidence: 1.0,
+    needsAdminApproval: false,
   };
 }
 
@@ -760,19 +697,22 @@ export async function handleRegistration(userId, username, requestedNumber) {
     },
   ];
 
-  const initialResponse = await callGroq(messages);
+  // Groq — 1 call ብቻ
+  const response = await callGroq(messages);
 
-  const result = await correctionLoop(
-    `ምዝገባ ቁጥር ${requestedNumber}`,
-    initialResponse,
-    systemPrompt,
-    situation
-  );
+  // DeepSeek background ሆኖ ይማራል
+  setImmediate(() => {
+    deepSeekBackgroundLearn(
+      `ምዝገባ ቁጥር ${requestedNumber}`,
+      response,
+      situation
+    ).catch(err => console.error('[BACKGROUND] Error:', err.message));
+  });
 
   return {
-    response: result.response,
+    response,
     available: !numberTaken && validRange && !alreadyRegistered,
-    confidence: result.confidence,
+    confidence: 1.0,
   };
 }
 
@@ -790,15 +730,11 @@ export async function generateAnnouncement(topic, details) {
   ];
   const response = await callGroq(messages);
 
-  const evaluation = await deepSeekEvaluate(
-    `announcement: ${topic}`,
-    response,
-    'generating announcement'
-  );
-
-  if (!evaluation.isCorrect && evaluation.correction) {
-    return evaluation.correction;
-  }
+  // DeepSeek background ሆኖ ይማራል
+  setImmediate(() => {
+    deepSeekBackgroundLearn(`announcement: ${topic}`, response, 'generating announcement')
+      .catch(err => console.error('[BACKGROUND] Error:', err.message));
+  });
 
   return response;
 }
@@ -855,12 +791,25 @@ const BATCH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 let batchTimer = null;
 const miniSummaries = [];
 
-export function addToBuffer(msg, isAdmin) {
+// ዕለታዊ Q&A exchanges
+const dailyExchanges = [];
+
+export function addToBuffer(msg, isAdmin, groqResponse = null) {
   messageBuffer.push({
     text: msg.text || '',
+    groqResponse,
     isAdmin,
     timestamp: Date.now(),
   });
+
+  // Q&A exchange ካለ daily buffer ውስጥ ያስቀምጣል
+  if (!isAdmin && groqResponse) {
+    dailyExchanges.push({
+      user: msg.text || '',
+      bot: groqResponse,
+      time: new Date().toISOString(),
+    });
+  }
 
   learningEvents.emit('activity', {
     type: 'learn',
@@ -894,7 +843,10 @@ async function processBatch() {
   });
 
   const adminMessages = batch.filter(m => m.isAdmin).map(m => m.text);
-  const userMessages = batch.filter(m => !m.isAdmin).map(m => m.text);
+  const userMessages = batch.filter(m => !m.isAdmin);
+  const qaExchanges = userMessages
+    .filter(m => m.groqResponse)
+    .map((m, i) => `${i + 1}. User: "${m.text}" → Bot: "${m.groqResponse}"`);
 
   const prompt = `
 You are a learning AI for an Amharic Telegram lottery group bot.
@@ -904,8 +856,11 @@ Analyze this batch of ${batch.length} messages and extract ALL learning patterns
 ADMIN messages (${adminMessages.length}):
 ${adminMessages.map((m, i) => `${i + 1}. "${m}"`).join('\n') || 'None'}
 
-USER messages (${userMessages.length}):
-${userMessages.map((m, i) => `${i + 1}. "${m}"`).join('\n') || 'None'}
+USER messages with BOT responses (${qaExchanges.length}):
+${qaExchanges.join('\n') || 'None'}
+
+USER messages without response (${userMessages.filter(m => !m.groqResponse).length}):
+${userMessages.filter(m => !m.groqResponse).map((m, i) => `${i + 1}. "${m.text}"`).join('\n') || 'None'}
 
 Extract:
 1. Admin style patterns (phrases, tone, emojis)
@@ -986,6 +941,8 @@ export async function deepNightLearning() {
 
   const summariesToProcess = [...miniSummaries];
   miniSummaries.length = 0;
+  const exchangesToReview = [...dailyExchanges];
+  dailyExchanges.length = 0;
 
   const prompt = `
 You are a deep learning AI for an Amharic lottery Telegram bot.
@@ -1008,6 +965,9 @@ Current knowledge state:
 
 Best Q&A pairs learned:
 ${bestPairs.slice(0, 10).map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n')}
+
+Today's Q&A exchanges (bot responses to review):
+${exchangesToReview.slice(0, 100).map((e, i) => `${i+1}. User: "${e.user}" → Bot: "${e.bot}"`).join('\n') || 'None'}
 
 Today's message count: ${history.length}
 
@@ -1153,10 +1113,10 @@ Return ONLY valid JSON:
     }
 
     if (isBad) {
-  updates.rules = [
-    `Avoid responding like "${botResponse.slice(0, 50)}" when user says "${userText.slice(0, 50)}" — find a better response`,
-  ];
-}
+      updates.rules = [
+        `Avoid responding like "${botResponse.slice(0, 50)}" when user says "${userText.slice(0, 50)}" — find a better response`,
+      ];
+    }
 
     if (Object.keys(updates).length > 0) {
       await updateKnowledge(updates);
