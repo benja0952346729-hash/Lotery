@@ -10,9 +10,10 @@ import {
 import {
   learnFromMessage, learnLotteryRules, generateLearningSummary,
   learningEvents, getTokenStats, testNvidiaConnection,
-  learnFromBoard, parseBoard, renderBoard,
+  learnFromBoard, parseBoard, renderBoard, learnQAPair, learnFromRating,
+  addToBuffer, deepNightLearning,
+  generateResponse, handleRegistration, generateAnnouncement,
 } from './aiService.js';
-import { generateResponse, handleRegistration, generateAnnouncement } from './aiService.js';
 import { getKeyStats } from './keys.js';
 
 // ============================================================
@@ -46,6 +47,19 @@ const pendingResponses = new Map();
 async function handleAdminCommand(bot, msg) {
   const text = msg.text || '';
   const chatId = msg.chat.id;
+
+  // ── RATING ON/OFF ──
+  if (text === '/ratingon') {
+    ratingEnabled = true;
+    await bot.sendMessage(chatId, '🔔 Rating ተከፈተ — Bot ሲናገር rate መስጠት ትችላለህ');
+    return;
+  }
+
+  if (text === '/ratingoff') {
+    ratingEnabled = false;
+    await bot.sendMessage(chatId, '🔕 Rating ጠፋ — Bot በዝምታ ይሰራል');
+    return;
+  }
 
   // ── BOT ON/OFF ──
   if (text === '/on') {
@@ -320,6 +334,8 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
 ━━━━━━━━━━━━━━
 /on — Bot ያብራ
 /off — Bot ያጥፋ
+/ratingon — Rating ያብራ ⭐
+/ratingoff — Rating ያጥፋ 🔕
 /status — Bot status
 /board — Board ወደ group ልካ
 /boardpreview — Board preview (private)
@@ -391,9 +407,28 @@ async function handleGroupMessage(bot, msg) {
       await alertAdmin(bot, '📋 Board text ተማረ ✅', 'SUCCESS');
     }
 
-    learnFromMessage(msg, true).catch(err =>
-      console.error('[LEARN] Error:', err.message)
-    );
+    // ── Q&A PAIR LEARNING — admin reply to user ──
+    // Admin ሰውን reply ሲያደርግ → user question + admin answer pair ይማራል
+    if (msg.reply_to_message) {
+      const repliedMsg = msg.reply_to_message;
+      const userText = repliedMsg.text || '';
+      const repliedUserId = repliedMsg.from?.id;
+
+      // Admin ራሱን reply አላደረገም + user message ካለ
+      if (repliedUserId !== ADMIN_ID && userText) {
+        learnQAPair(userText, text, `group conversation`).then(() => {
+          learningEvents.emit('activity', {
+            type: 'learn',
+            msg: `💬 Q&A learned — "${userText.slice(0, 30)}" → "${text.slice(0, 30)}"`
+          });
+        }).catch(err =>
+          console.error('[QA] Learn error:', err.message)
+        );
+      }
+    }
+
+    // Batch buffer ያስቀምጣል — 50 ሲሞሉ ወይም 10 min → DeepSeek
+    addToBuffer(msg, true);
     learnLotteryRules(text).catch(err =>
       console.error('[RULES] Error:', err.message)
     );
@@ -404,10 +439,8 @@ async function handleGroupMessage(bot, msg) {
   const isOn = await getBotState();
   if (!isOn) return;
 
-  // DeepSeek background learning
-  learnFromMessage(msg, false).catch(err =>
-    console.error('[LEARN] Error:', err.message)
-  );
+  // Batch buffer ያስቀምጣል
+  addToBuffer(msg, false);
 
   // ── REGISTRATION CHECK ──
   const registrationMatch = text.match(/(\d+)/);
@@ -431,9 +464,38 @@ async function handleGroupMessage(bot, msg) {
     const result = await generateResponse(text, userId, username);
 
     if (result.confidence >= CONFIDENCE_THRESHOLD) {
-      await bot.sendMessage(chatId, result.response, {
+      const sentMsg = await bot.sendMessage(chatId, result.response, {
         reply_to_message_id: msg.message_id,
       });
+
+      // Rating buttons — admin ብቻ ያያቸዋል (private alert)
+      const ratingId = `rate_${sentMsg.message_id}_${Date.now()}`;
+      pendingRatings.set(ratingId, {
+        userText: text,
+        botResponse: result.response,
+        chatId,
+        messageId: sentMsg.message_id,
+      });
+
+      if (ratingEnabled) {
+        await alertAdmin(
+          bot,
+          `🤖 Bot ተናገረ — Rate ስጠው:\n\n👤 @${username}: "${text}"\n🤖 Bot: "${result.response}"`,
+          'INFO'
+        );
+        await bot.sendMessage(ADMIN_ID, '⭐ Rating:', {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '👎 ዝቅተኛ', callback_data: `${ratingId}:1` },
+              { text: '😐 መካከለኛ', callback_data: `${ratingId}:2` },
+              { text: '👍 አሪፍ', callback_data: `${ratingId}:3` },
+              { text: '🔥 በጣም አሪፍ', callback_data: `${ratingId}:4` },
+            ], [
+              { text: '🔕 Rating አጥፋ', callback_data: 'toggle_rating:off' },
+            ]]
+          }
+        });
+      }
 
       if (result.wasCorrected) {
         await alertAdmin(
@@ -504,6 +566,14 @@ async function handleLotteryRegistration(bot, msg, userId, username, requestedNu
   }
 }
 
+
+// ============================================================
+// ⭐ RATING SYSTEM
+// ============================================================
+let ratingEnabled = true;
+const pendingRatings = new Map();
+const RATING_LABELS = { 1: "👎 ዝቅተኛ", 2: "😐 መካከለኛ", 3: "👍 አሪፍ", 4: "🔥 በጣም አሪፍ" };
+const RATING_CONFIDENCE = { 1: -0.3, 2: 0.0, 3: 0.2, 4: 0.4 };
 // ============================================================
 // 🗄️ INIT DB
 // ============================================================
@@ -783,6 +853,102 @@ bot.on('message', async (msg) => {
   } catch (err) {
     console.error('[BOT] Unhandled error:', err.message);
     await alertAdmin(bot, `🚨 Unhandled error: ${err.message}`, 'ERROR').catch(() => {});
+  }
+});
+
+bot.on('callback_query', async (query) => {
+  const data = query.data;
+  const userId = query.from?.id;
+
+  if (!isAdmin(userId)) {
+    await bot.answerCallbackQuery(query.id, { text: 'Admin ብቻ ነው 🚫' });
+    return;
+  }
+
+  // ── RATING TOGGLE ──
+  if (data === 'toggle_rating:off') {
+    ratingEnabled = false;
+    await bot.answerCallbackQuery(query.id, { text: '🔕 Rating ጠፋ' });
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [[{ text: '🔔 Rating አብራ', callback_data: 'toggle_rating:on' }]] },
+      { chat_id: query.message.chat.id, message_id: query.message.message_id }
+    );
+    return;
+  }
+
+  if (data === 'toggle_rating:on') {
+    ratingEnabled = true;
+    await bot.answerCallbackQuery(query.id, { text: '🔔 Rating ተከፈተ' });
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [[{ text: '🔕 Rating አጥፋ', callback_data: 'toggle_rating:off' }]] },
+      { chat_id: query.message.chat.id, message_id: query.message.message_id }
+    );
+    return;
+  }
+
+  // ── RATING SUBMIT ──
+  if (data.startsWith('rate_')) {
+    const [ratingId, scoreStr] = data.rsplit(':', 1);
+    // rsplit አይሰራም — split እንጠቀም
+    const lastColon = data.lastIndexOf(':');
+    const rId = data.substring(0, lastColon);
+    const score = parseInt(data.substring(lastColon + 1));
+    const pending = pendingRatings.get(rId);
+
+    if (!pending) {
+      await bot.answerCallbackQuery(query.id, { text: '⏰ Expired' });
+      return;
+    }
+
+    const label = RATING_LABELS[score] || '?';
+    const confidenceAdj = RATING_CONFIDENCE[score] || 0;
+
+    // DeepSeek ያስተምራል — rating aware
+    learnFromRating(
+      pending.userText,
+      pending.botResponse,
+      score
+    ).then(() => {
+      learningEvents.emit('activity', {
+        type: score >= 3 ? 'learn' : 'eval',
+        msg: `⭐ Rating: ${label} — "${pending.userText.slice(0, 30)}"`
+      });
+    }).catch(() => {});
+
+    pendingRatings.delete(rId);
+
+    // Button ያስወግዳል
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [[{ text: `✅ ${label} ተሰጠ`, callback_data: 'done' }]] },
+      { chat_id: query.message.chat.id, message_id: query.message.message_id }
+    );
+    await bot.answerCallbackQuery(query.id, { text: `${label} — DeepSeek ተማረ! ✅` });
+    return;
+  }
+
+  await bot.answerCallbackQuery(query.id);
+});
+
+
+// ── 24hr Deep Learning — ሌሊት 11 PM ──
+cron.schedule('0 23 * * *', async () => {
+  try {
+    await alertAdmin(bot, '🌙 24hr Deep Learning እየጀመረ...', 'INFO');
+    const result = await deepNightLearning();
+    if (result) {
+      await bot.sendMessage(
+        ADMIN_ID,
+        `🌙 *24HR DEEP LEARNING ተጠናቀቀ!*\n━━━━━━━━━━━━━━\n` +
+        `📚 ${result.dailySummary}\n\n` +
+        `🎯 Patterns learned: ${result.totalPatternsLearned}\n` +
+        `💪 New confidence: ${Math.round((result.newConfidence || 0) * 100)}%\n` +
+        `⚠️ Gaps: ${result.gaps?.slice(0, 3).join(', ') || 'None'}\n` +
+        `🚀 Ready: ${result.readyToReplace ? 'YES ✅' : 'Not yet'}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  } catch (err) {
+    console.error('[CRON] Night learning error:', err.message);
   }
 });
 
