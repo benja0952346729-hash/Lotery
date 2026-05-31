@@ -47,6 +47,7 @@ async function query(sql, params = [], retries = Math.max(pools.length, 3)) {
 }
 
 export async function initDB() {
+  // ── Knowledge ──
   await query(`
     CREATE TABLE IF NOT EXISTS knowledge (
       id SERIAL PRIMARY KEY,
@@ -56,6 +57,7 @@ export async function initDB() {
     )
   `);
 
+  // ── History ──
   await query(`
     CREATE TABLE IF NOT EXISTS history (
       id SERIAL PRIMARY KEY,
@@ -69,6 +71,7 @@ export async function initDB() {
     )
   `);
 
+  // ── Lottery ──
   await query(`
     CREATE TABLE IF NOT EXISTS lottery (
       id SERIAL PRIMARY KEY,
@@ -79,20 +82,17 @@ export async function initDB() {
     )
   `);
 
+  // ── Bot State ──
   await query(`
     CREATE TABLE IF NOT EXISTS bot_state (
       id INTEGER PRIMARY KEY DEFAULT 1,
       is_on BOOLEAN DEFAULT FALSE,
       toggled_at TIMESTAMP DEFAULT NOW(),
-      toggled_by BIGINT,
-      last_board_message_id BIGINT DEFAULT NULL
+      toggled_by BIGINT
     )
   `);
 
-  await query(`
-    ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS last_board_message_id BIGINT DEFAULT NULL
-  `).catch(() => {});
-
+  // ── Token Usage ──
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
       id SERIAL PRIMARY KEY,
@@ -104,19 +104,7 @@ export async function initDB() {
     )
   `);
 
-  await query(`
-    CREATE TABLE IF NOT EXISTS board_snapshots (
-      id SERIAL PRIMARY KEY,
-      slots JSONB NOT NULL DEFAULT '{}',
-      raw_text TEXT,
-      context TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
-    )
-  `).catch(err => console.error('[DB] board_snapshots:', err.message));
-
-  // ── አዲስ: Action Logs ──
-  // አንተ ያደረጋቸው actions ሁሉ ይቀመጣሉ — ለምን፣ መቼ፣ እንዴት
+  // ── Action Logs ──
   await query(`
     CREATE TABLE IF NOT EXISTS action_logs (
       id SERIAL PRIMARY KEY,
@@ -133,8 +121,7 @@ export async function initDB() {
     )
   `);
 
-  // ── አዲስ: Q&A Pairs ──
-  // ሰው ጠየቀ + አንተ/bot መለሰ → pair ይቀመጣል
+  // ── Q&A Pairs ──
   await query(`
     CREATE TABLE IF NOT EXISTS qa_pairs (
       id SERIAL PRIMARY KEY,
@@ -151,6 +138,41 @@ export async function initDB() {
     )
   `);
 
+  // ── Board Messages — admin board ሲልክ message_id ይቀመጣል ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS board_messages (
+      id SERIAL PRIMARY KEY,
+      message_id BIGINT UNIQUE NOT NULL,
+      chat_id BIGINT NOT NULL,
+      text TEXT,
+      sent_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  // ── Board Edits — admin manually edit ሲያደርግ before/after ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS board_edits (
+      id SERIAL PRIMARY KEY,
+      message_id BIGINT NOT NULL,
+      chat_id BIGINT NOT NULL,
+      before_text TEXT,
+      after_text TEXT,
+      learned BOOLEAN DEFAULT FALSE,
+      edited_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  // ── Deleted Messages — admin message ሲሰርዝ ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS deleted_messages (
+      id SERIAL PRIMARY KEY,
+      message_id BIGINT NOT NULL,
+      chat_id BIGINT NOT NULL,
+      text TEXT,
+      deleted_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
   await ensureTokenService('nvidia-deepseek');
   await ensureTokenService('groq');
 
@@ -164,8 +186,6 @@ export async function initDB() {
     userPatterns: {},
     rules: [],
     intents: [],
-    boardRules: {},
-    boardPatterns: [],
     writingStyle: { amharic: [], tone: '', commonPhrases: [] },
     lastUpdated: null,
   };
@@ -217,7 +237,7 @@ function deepMergeArrays(target, source) {
   return result;
 }
 
-// ===== HISTORY — 7 ቀን ብቻ =====
+// ===== HISTORY =====
 export async function saveHistory(message) {
   await query(`
     INSERT INTO history (message_id, user_id, username, first_name, text, is_admin)
@@ -231,10 +251,7 @@ export async function saveHistory(message) {
     message._isAdmin || false,
   ]);
 
-  // 7 ቀን ያለፈ raw history ያጠፋ — learned knowledge ይቆያል
-  await query(`
-    DELETE FROM history WHERE created_at < NOW() - INTERVAL '7 days'
-  `);
+
 }
 
 export async function getHistory(days = 7) {
@@ -247,11 +264,86 @@ export async function getHistory(days = 7) {
   return res.rows;
 }
 
-// ===== ACTION LOGS =====
+// ===== BOARD MESSAGES =====
 
-// አዲስ action ያስቀምጣል ወይም ያለውን ያዘምናል
+// Admin board message ሲልክ → message_id ያስቀምጣል
+export async function saveBoardMessage(messageId, chatId, text) {
+  await query(`
+    INSERT INTO board_messages (message_id, chat_id, text)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (message_id) DO UPDATE SET text = $3, sent_at = NOW()
+  `, [messageId, chatId, text]);
+}
+
+// Current board message ያወጣል
+export async function getBoardMessage() {
+  const res = await query(`
+    SELECT * FROM board_messages ORDER BY sent_at DESC LIMIT 1
+  `);
+  return res.rows[0] || null;
+}
+
+// Board message text ያዘምናል (bot edit ሲያደርግ)
+export async function updateBoardMessageText(messageId, newText) {
+  await query(`
+    UPDATE board_messages SET text = $1 WHERE message_id = $2
+  `, [newText, messageId]);
+}
+
+// ===== BOARD EDITS =====
+
+// Admin manually edit ሲያደርግ → before/after ያስቀምጣል
+export async function saveBoardEdit(messageId, chatId, beforeText, afterText) {
+  await query(`
+    INSERT INTO board_edits (message_id, chat_id, before_text, after_text)
+    VALUES ($1, $2, $3, $4)
+  `, [messageId, chatId, beforeText, afterText]);
+}
+
+// DeepSeek ያላወቀ edits ያወጣል
+export async function getUnlearnedEdits(limit = 20) {
+  const res = await query(`
+    SELECT * FROM board_edits
+    WHERE learned = FALSE
+    ORDER BY edited_at ASC
+    LIMIT $1
+  `, [limit]);
+  return res.rows;
+}
+
+// Edit ተምሯል ብሎ ያስቀምጣል
+export async function markEditLearned(id) {
+  await query(`UPDATE board_edits SET learned = TRUE WHERE id = $1`, [id]);
+}
+
+// All edits ያወጣል — DeepSeek ለማስተማር
+export async function getBoardEdits(limit = 50) {
+  const res = await query(`
+    SELECT * FROM board_edits ORDER BY edited_at DESC LIMIT $1
+  `, [limit]);
+  return res.rows;
+}
+
+// ===== DELETED MESSAGES =====
+
+// Admin message ሲሰርዝ → ያስቀምጣል
+export async function saveDeletedMessage(messageId, chatId, text) {
+  await query(`
+    INSERT INTO deleted_messages (message_id, chat_id, text)
+    VALUES ($1, $2, $3)
+  `, [messageId, chatId, text || '']);
+}
+
+// Deleted messages ያወጣል
+export async function getDeletedMessages(limit = 20) {
+  const res = await query(`
+    SELECT * FROM deleted_messages ORDER BY deleted_at DESC LIMIT $1
+  `, [limit]);
+  return res.rows;
+}
+
+// ===== ACTION LOGS =====
 export async function saveActionLog(actionType, trigger, reason, details = {}, isAdmin = true) {
-  // ተመሳሳይ action ካለ ያዘምናል
   const existing = await query(`
     SELECT id, times_seen, times_correct FROM action_logs
     WHERE action_type = $1 AND trigger = $2
@@ -281,7 +373,6 @@ export async function saveActionLog(actionType, trigger, reason, details = {}, i
   }
 }
 
-// Action confidence ያዘምናል — ልክ ነበር ወይ አልነበረም
 export async function updateActionConfidence(actionType, trigger, wasCorrect) {
   const res = await query(`
     SELECT id, times_seen, times_correct FROM action_logs
@@ -292,17 +383,14 @@ export async function updateActionConfidence(actionType, trigger, wasCorrect) {
     const row = res.rows[0];
     const newCorrect = row.times_correct + (wasCorrect ? 1 : 0);
     const newSeen = row.times_seen + 1;
-    const newConfidence = newCorrect / newSeen;
-
     await query(`
       UPDATE action_logs
       SET times_seen = $1, times_correct = $2, confidence = $3, updated_at = NOW()
       WHERE id = $4
-    `, [newSeen, newCorrect, newConfidence, row.id]);
+    `, [newSeen, newCorrect, newCorrect / newSeen, row.id]);
   }
 }
 
-// Actions ያወጣል — Groq ለማስተማር
 export async function getActionLogs(minConfidence = 0.0) {
   const res = await query(`
     SELECT * FROM action_logs
@@ -314,10 +402,7 @@ export async function getActionLogs(minConfidence = 0.0) {
 }
 
 // ===== Q&A PAIRS =====
-
-// ሰው ጠየቀ + admin/bot መለሰ → pair ያስቀምጣል
 export async function saveQAPair(userMessage, adminReply, context = '', intent = '', isAdminVerified = false) {
-  // ተመሳሳይ question ካለ ያዘምናል
   const existing = await query(`
     SELECT id, times_used, times_correct FROM qa_pairs
     WHERE user_message = $1
@@ -349,7 +434,6 @@ export async function saveQAPair(userMessage, adminReply, context = '', intent =
   }
 }
 
-// Q&A confidence ያዘምናል
 export async function updateQAConfidence(userMessage, wasCorrect) {
   const res = await query(`
     SELECT id, times_used, times_correct FROM qa_pairs
@@ -360,17 +444,14 @@ export async function updateQAConfidence(userMessage, wasCorrect) {
     const row = res.rows[0];
     const newCorrect = row.times_correct + (wasCorrect ? 1 : 0);
     const newUsed = row.times_used + 1;
-    const newConfidence = newCorrect / newUsed;
-
     await query(`
       UPDATE qa_pairs
       SET times_used = $1, times_correct = $2, confidence = $3, updated_at = NOW()
       WHERE id = $4
-    `, [newUsed, newCorrect, newConfidence, row.id]);
+    `, [newUsed, newCorrect, newCorrect / newUsed, row.id]);
   }
 }
 
-// ተመሳሳይ question ፈልግ
 export async function findSimilarQA(userMessage, limit = 5) {
   const res = await query(`
     SELECT * FROM qa_pairs
@@ -387,7 +468,6 @@ export async function findSimilarQA(userMessage, limit = 5) {
   return res.rows;
 }
 
-// Best Q&A pairs ያወጣል — Groq ለማስተማር
 export async function getBestQAPairs(limit = 30) {
   const res = await query(`
     SELECT * FROM qa_pairs
@@ -438,17 +518,6 @@ export async function setBotState(isOn, adminId) {
   `, [isOn, adminId]);
 }
 
-export async function saveLastBoardMessageId(messageId) {
-  await query(`
-    UPDATE bot_state SET last_board_message_id = $1 WHERE id = 1
-  `, [messageId]);
-}
-
-export async function getLastBoardMessageId() {
-  const res = await query(`SELECT last_board_message_id FROM bot_state WHERE id = 1`);
-  return res.rows[0]?.last_board_message_id || null;
-}
-
 // ===== TOKEN USAGE =====
 export async function addTokenUsage(service, inputTokens, outputTokens) {
   const res = await query(`
@@ -487,44 +556,37 @@ export async function resetTokenUsage() {
   await query(`UPDATE token_usage SET input_tokens=0, output_tokens=0, calls=0, updated_at=NOW()`);
 }
 
-// ===== BOARD SNAPSHOTS =====
-export async function getBoardState() {
-  const res = await query(`
-    SELECT * FROM board_snapshots ORDER BY updated_at DESC LIMIT 1
-  `);
-  if (!res.rows[0]) return null;
-  return {
-    slots: res.rows[0].slots || {},
-    rawText: res.rows[0].raw_text,
-    context: res.rows[0].context,
-    updatedAt: res.rows[0].updated_at,
-  };
-}
+// ===== CLEANUP — 5 ቀን ያለፈ raw data ያጠፋ =====
+// Knowledge አይጠፋም — raw collected data ብቻ ነው የሚጠፋው
+export async function cleanupOldData() {
+  const results = {};
 
-export async function updateBoardState(parsed) {
-  const existing = await query(`SELECT id FROM board_snapshots LIMIT 1`);
+  // History — 5 ቀን
+  const h = await query(`DELETE FROM history WHERE created_at < NOW() - INTERVAL '5 days'`);
+  results.history = h.rowCount;
 
-  if (existing.rows.length > 0) {
-    await query(`
-      UPDATE board_snapshots
-      SET slots = $1, raw_text = $2, context = $3, updated_at = NOW()
-      WHERE id = $4
-    `, [
-      JSON.stringify(parsed.slots || {}),
-      parsed.raw || null,
-      parsed.context || null,
-      existing.rows[0].id,
-    ]);
-  } else {
-    await query(`
-      INSERT INTO board_snapshots (slots, raw_text, context)
-      VALUES ($1, $2, $3)
-    `, [
-      JSON.stringify(parsed.slots || {}),
-      parsed.raw || null,
-      parsed.context || null,
-    ]);
-  }
+  // Board edits — 5 ቀን
+  const be = await query(`DELETE FROM board_edits WHERE edited_at < NOW() - INTERVAL '5 days'`);
+  results.boardEdits = be.rowCount;
+
+  // Deleted messages — 5 ቀን
+  const dm = await query(`DELETE FROM deleted_messages WHERE deleted_at < NOW() - INTERVAL '5 days'`);
+  results.deletedMessages = dm.rowCount;
+
+  // Board messages — 5 ቀን
+  const bm = await query(`DELETE FROM board_messages WHERE sent_at < NOW() - INTERVAL '5 days'`);
+  results.boardMessages = bm.rowCount;
+
+  // Action logs — 5 ቀን
+  const al = await query(`DELETE FROM action_logs WHERE updated_at < NOW() - INTERVAL '5 days'`);
+  results.actionLogs = al.rowCount;
+
+  // QA pairs — 5 ቀን
+  const qa = await query(`DELETE FROM qa_pairs WHERE updated_at < NOW() - INTERVAL '5 days'`);
+  results.qaPairs = qa.rowCount;
+
+  console.log('[DB] Cleanup done:', results);
+  return results;
 }
 
 export { query };
