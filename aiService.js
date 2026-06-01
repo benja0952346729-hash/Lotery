@@ -641,7 +641,20 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
     deepSeekBackgroundLearn(userMessage, parsed.response, `User: ${username}, Intent: ${parsed.intent}`)
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
   });
-
+   // decideBotAction ን ጋር አዋህድ
+try {
+  const decidedAction = await decideBotAction(userMessage, username, currentBoardText);
+  if (decidedAction && decidedAction.confidence > (parsed.confidence || 0)) {
+    parsed.action = decidedAction.action;
+    parsed.slotNumber = decidedAction.slotNumber || parsed.slotNumber;
+    if (decidedAction.responseText) {
+      parsed.response = decidedAction.responseText;
+      parsed.confidence = decidedAction.confidence;
+    }
+  }
+} catch (err) {
+  console.error('[DECIDE] Error:', err.message);
+}
   return {
     response: parsed.response,
     intent: parsed.intent,
