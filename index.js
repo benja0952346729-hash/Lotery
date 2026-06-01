@@ -421,7 +421,19 @@ async function handleGroupMessage(bot, msg) {
       const result = await handleIncomingMessage(
         msg, userId, username, boardMsg?.text || ''
       );
-      if (result?.response) {
+
+      if (!result) return;
+
+      // ── send_board action ──
+      if (result.action === 'send_board' && result.boardText) {
+        const sent = await bot.sendMessage(chatId, result.boardText);
+        await saveBoardMessage(sent.message_id, chatId, result.boardText);
+        await alertAdmin(bot, `📋 Bot board ላከ!\nTriggered by admin: "${text}"`, 'SUCCESS');
+        return;
+      }
+
+      // ── teaching/command response ──
+      if (result.response) {
         await bot.sendMessage(chatId, result.response);
       }
       return;
