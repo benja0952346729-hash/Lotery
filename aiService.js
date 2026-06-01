@@ -734,30 +734,46 @@ export async function generateAnnouncement(topic, details) {
 // ─────────────────────────────────────────
 // GENERATE LEARNING SUMMARY
 // ─────────────────────────────────────────
+
 export async function generateLearningSummary() {
   const knowledge = await readKnowledge();
-  const history = await getHistory(7);
-  const actionLogs = await getActionLogs(0.0);
+  const history = await getHistory(5);
   const bestPairs = await getBestQAPairs(10);
   const edits = await getBoardEdits(20);
   const deletions = await getDeletedMessages(10);
 
+  const rulesCount = knowledge.rules?.length || 0;
+  const intentsCount = knowledge.intents?.length || 0;
+  const phrasesCount = knowledge.adminStyle?.responses?.length || 0;
+
   const prompt = `
 Summarize learning from this Telegram lottery group.
 
-Knowledge: ${JSON.stringify(knowledge)}
-Messages in last 7 days: ${history.length}
-Actions learned: ${actionLogs.length}
-Q&A pairs: ${bestPairs.length}
-Board edits learned: ${edits.length}
-Deleted messages learned: ${deletions.length}
+Current data:
+- Admin phrases: ${phrasesCount}
+- Rules learned: ${rulesCount}
+- Intents: ${intentsCount}
+- Q&A pairs: ${bestPairs.length}
+- Board edits: ${edits.length}
+- Messages (5 days): ${history.length}
+
+Top rules:
+${knowledge.rules?.slice(0, 10).map((r, i) => (i+1) + '. ' + r).join('\n') || 'None'}
+
+Calculate REAL confidence (DO NOT default to 0.75):
+- 0-20%: 0-5 rules, 0-10 intents
+- 21-40%: 6-15 rules, 11-30 intents
+- 41-60%: 16-30 rules, 31-60 intents
+- 61-80%: 31-50 rules, 61-100 intents
+- 81-95%: 50+ rules, 100+ intents
+- 96-100%: fully ready
 
 Return ONLY valid JSON:
 {
   "summary": "brief summary in Amharic and English",
   "newThingsLearned": [],
   "weakAreas": [],
-  "confidence": 0.75,
+  "confidence": <CALCULATE_FROM_DATA_ABOVE>,
   "readyToReplace": false
 }`;
 
@@ -765,6 +781,12 @@ Return ONLY valid JSON:
     const response = await callDeepSeek(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
+
+    await updateKnowledge({
+      confidence: parsed.confidence,
+      readyToReplace: parsed.readyToReplace || false,
+    });
+
     learningEvents.emit('activity', {
       type: 'learn',
       msg: `📊 Summary — ${Math.round((parsed.confidence || 0) * 100)}%`
