@@ -5,25 +5,26 @@ import cron from 'node-cron';
 import {
   readKnowledge, updateKnowledge, saveHistory, getHistory,
   registerMember, getLotteryList, getBotState, setBotState,
-  initDB, query, getBoardState, updateBoardState, removeMember, clearLottery,
+  initDB, query,
+  removeMember, clearLottery,
+  saveBoardMessage, getBoardMessage, updateBoardMessageText,
+  saveBoardEdit, getUnlearnedEdits, markEditLearned,
+  saveDeletedMessage, getDeletedMessages,
+  cleanupOldData,
 } from './database.js';
 import {
   learnFromMessage, learnLotteryRules, generateLearningSummary,
   learningEvents, getTokenStats, testNvidiaConnection,
-  learnFromBoard, parseBoard, renderBoard, learnQAPair, learnFromRating,
+  learnQAPair, learnFromRating,
   addToBuffer, deepNightLearning,
   generateResponse, handleRegistration, generateAnnouncement,
+  learnFromEdit, learnFromDelete, decideBotAction,
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
 
 // ============================================================
-// 🔑 KEY ROTATION — imported via keys.js directly
-// ============================================================
-
-// ============================================================
 // 👑 ADMIN HANDLER
 // ============================================================
-
 const ADMIN_ID = parseInt(process.env.ADMIN_CHAT_ID);
 
 function isAdmin(userId) {
@@ -39,9 +40,6 @@ async function alertAdmin(bot, message, level = 'INFO') {
   }
 }
 
-// ─────────────────────────────────────────
-// ADMIN COMMANDS
-// ─────────────────────────────────────────
 const pendingResponses = new Map();
 
 async function handleAdminCommand(bot, msg) {
@@ -51,26 +49,24 @@ async function handleAdminCommand(bot, msg) {
   // ── RATING ON/OFF ──
   if (text === '/ratingon') {
     ratingEnabled = true;
-    await bot.sendMessage(chatId, '🔔 Rating ተከፈተ — Bot ሲናገር rate መስጠት ትችላለህ');
+    await bot.sendMessage(chatId, '🔔 Rating ተከፈተ');
     return;
   }
-
   if (text === '/ratingoff') {
     ratingEnabled = false;
-    await bot.sendMessage(chatId, '🔕 Rating ጠፋ — Bot በዝምታ ይሰራል');
+    await bot.sendMessage(chatId, '🔕 Rating ጠፋ');
     return;
   }
 
   // ── BOT ON/OFF ──
   if (text === '/on') {
     await setBotState(true, ADMIN_ID);
-    await bot.sendMessage(chatId, '✅ Bot is now ON\nGroq ይናገራል + DeepSeek ይማራል');
+    await bot.sendMessage(chatId, '✅ Bot is now ON');
     return;
   }
-
   if (text === '/off') {
     await setBotState(false, ADMIN_ID);
-    await bot.sendMessage(chatId, '❌ Bot is now OFF\nDeepSeek ብቻ ይማራል (silent mode)');
+    await bot.sendMessage(chatId, '❌ Bot is now OFF');
     return;
   }
 
@@ -91,13 +87,7 @@ async function handleAdminCommand(bot, msg) {
     const keyStats = getKeyStats();
     const knowledge = await readKnowledge();
     const lotteryList = await getLotteryList();
-    const boardState = await getBoardState().catch(() => null);
-    const filledSlots = boardState
-      ? Object.values(boardState.slots || {}).filter(s => s.name).length
-      : lotteryList.length;
-    const paidSlots = boardState
-      ? Object.values(boardState.slots || {}).filter(s => s.status === 'paid').length
-      : 0;
+    const boardMsg = await getBoardMessage();
 
     await bot.sendMessage(chatId, `
 📊 *BOT STATUS*
@@ -106,12 +96,11 @@ async function handleAdminCommand(bot, msg) {
 🧠 Knowledge:
   • Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
   • Rules learned: ${knowledge.rules?.length || 0}
-  • Board rules: ${knowledge.boardRules ? '✅' : '❌'}
   • Intents: ${knowledge.intents?.length || 0}
-🎰 Board:
-  • Filled: ${filledSlots}/100
-  • Paid ✅: ${paidSlots}
-  • Pending ⏳: ${filledSlots - paidSlots}
+📋 Board:
+  • Current message ID: ${boardMsg?.message_id || 'None'}
+  • Last updated: ${boardMsg?.sent_at ? new Date(boardMsg.sent_at).toLocaleString() : 'Never'}
+🎰 Lottery: ${lotteryList.length} registered
 🔑 Keys:
   • DeepSeek/NVIDIA: ${keyStats.deepseek.total} keys
   • Groq: ${keyStats.groq.total} keys
@@ -119,130 +108,17 @@ async function handleAdminCommand(bot, msg) {
     return;
   }
 
-  // ── BOARD — ወደ group ይልካል ──
-  if (text === '/board') {
-    const knowledge = await readKnowledge();
-    const boardState = await getBoardState().catch(() => null);
-    if (!boardState) {
-      await bot.sendMessage(chatId, '❌ Board እስካሁን አልተማረም። Board ፎቶ ወይም text ልክ።');
-      return;
-    }
-    const boardText = renderBoard(boardState, knowledge);
-    await bot.sendMessage(process.env.GROUP_CHAT_ID, boardText);
-    await bot.sendMessage(chatId, '✅ Board ወደ group ተላከ');
-    return;
-  }
-
-  // ── BOARD PREVIEW (admin only) ──
-  if (text === '/boardpreview') {
-    const knowledge = await readKnowledge();
-    const boardState = await getBoardState().catch(() => null);
-    if (!boardState) {
-      await bot.sendMessage(chatId, '❌ Board data የለም');
-      return;
-    }
-    const boardText = renderBoard(boardState, knowledge);
-    await bot.sendMessage(chatId, boardText);
-    return;
-  }
-
-  // ── UPDATE SLOT — /update 96 ቢንያም paid ──
-  if (text.startsWith('/update ')) {
-    const parts = text.replace('/update ', '').trim().split(' ');
-    const number = parseInt(parts[0]);
-    const name = parts[1] || null;
-    const status = parts[2] || 'pending'; // paid | pending | open
-
-    if (isNaN(number) || number < 1 || number > 100) {
-      await bot.sendMessage(chatId, '❌ ትክክለኛ ቁጥር ስጥ (1-100)');
-      return;
-    }
-
-    const boardState = await getBoardState().catch(() => ({ slots: {} }));
-    boardState.slots = boardState.slots || {};
-    boardState.slots[number] = { number, name, status };
-    await updateBoardState(boardState);
-
-    const statusText = status === 'paid' ? '✅ ተከፍሏል' : status === 'pending' ? '⏳ ተመዝግቧል' : '# ክፍት';
-    await bot.sendMessage(chatId, `✅ Slot ${number} updated:\n${name || 'ክፍት'} — ${statusText}`);
-
-    // ወደ group ያዘምናል
-    const knowledge = await readKnowledge();
-    const boardText = renderBoard(boardState, knowledge);
-    await bot.sendMessage(process.env.GROUP_CHAT_ID, `📋 Board ታድሷል\n\n${boardText}`);
-    return;
-  }
-
-  // ── REMOVE SLOT — /remove 96 ──
-  if (text.startsWith('/remove ')) {
-    const number = parseInt(text.replace('/remove ', '').trim());
-    if (isNaN(number) || number < 1 || number > 100) {
-      await bot.sendMessage(chatId, '❌ ትክክለኛ ቁጥር ስጥ');
-      return;
-    }
-
-    const boardState = await getBoardState().catch(() => ({ slots: {} }));
-    if (boardState.slots?.[number]) {
-      const name = boardState.slots[number].name;
-      boardState.slots[number] = { number, name: null, status: 'open' };
-      await updateBoardState(boardState);
-      await removeMember(number).catch(() => {});
-      await bot.sendMessage(chatId, `✅ Slot ${number} (${name || 'unknown'}) ወጣ`);
-
-      // Board update
-      const knowledge = await readKnowledge();
-      const boardText = renderBoard(boardState, knowledge);
-      await bot.sendMessage(process.env.GROUP_CHAT_ID, `📋 Board ታድሷል\n\n${boardText}`);
-    } else {
-      await bot.sendMessage(chatId, `❌ Slot ${number} ክፍት ነው`);
-    }
-    return;
-  }
-
-  // ── PAY — /pay 96 ── (pending → paid)
-  if (text.startsWith('/pay ')) {
-    const number = parseInt(text.replace('/pay ', '').trim());
-    const boardState = await getBoardState().catch(() => ({ slots: {} }));
-    const slot = boardState.slots?.[number];
-
-    if (!slot || !slot.name) {
-      await bot.sendMessage(chatId, `❌ Slot ${number} ምዝገባ የለም`);
-      return;
-    }
-
-    boardState.slots[number].status = 'paid';
-    await updateBoardState(boardState);
-    await bot.sendMessage(chatId, `✅ ${slot.name} — ቁጥር ${number} ክፍያ confirmed!`);
-
-    // ወደ group ያሳውቃል
-    const knowledge = await readKnowledge();
-    await bot.sendMessage(
-      process.env.GROUP_CHAT_ID,
-      `✅ ${slot.name} ቁጥር ${number} ክፍያ ተረጋግጧል! 🎉`
-    );
-    return;
-  }
-
-  // ── CLEAR BOARD ──
-  if (text === '/clearboard') {
-    await updateBoardState({ slots: {} });
-    await clearLottery();
-    await bot.sendMessage(chatId, '🗑️ Board cleared — ሁሉም slots ወጡ');
-    return;
-  }
-
   // ── LIST ──
   if (text === '/list') {
-    const boardState = await getBoardState().catch(() => null);
-    if (!boardState || Object.keys(boardState.slots || {}).length === 0) {
+    const lotteryList = await getLotteryList();
+    if (lotteryList.length === 0) {
       await bot.sendMessage(chatId, '📋 ምንም ሰው አልተመዘገበም');
       return;
     }
-    const filled = Object.values(boardState.slots).filter(s => s.name);
-    const listText = filled.map(s =>
-      `${String(s.number).padStart(2, '0')}. ${s.name} ${s.status === 'paid' ? '✅' : '⏳'}`
+    const listText = lotteryList.map(m =>
+      `${String(m.number).padStart(2, '0')}. ${m.username}`
     ).join('\n');
-    await bot.sendMessage(chatId, `📋 *LOTTERY LIST* (${filled.length}/100)\n━━━━━━━━\n${listText}`, {
+    await bot.sendMessage(chatId, `📋 *LOTTERY LIST* (${lotteryList.length})\n━━━━━━━━\n${listText}`, {
       parse_mode: 'Markdown'
     });
     return;
@@ -252,8 +128,11 @@ async function handleAdminCommand(bot, msg) {
   if (text === '/summary') {
     await bot.sendMessage(chatId, '⏳ DeepSeek summary እየሰራ ነው...');
     const summary = await generateLearningSummary();
-    if (summary) {
-      await bot.sendMessage(chatId, `
+    if (!summary) {
+      await bot.sendMessage(chatId, '❌ Summary ሰራ አልቻለም');
+      return;
+    }
+    await bot.sendMessage(chatId, `
 📚 *LEARNING SUMMARY*
 ━━━━━━━━━━━━━━
 ${summary.summary}
@@ -266,8 +145,7 @@ ${summary.weakAreas?.map(a => `• ${a}`).join('\n') || 'None'}
 
 💪 Confidence: ${Math.round((summary.confidence || 0) * 100)}%
 🎯 Ready to replace: ${summary.readyToReplace ? 'YES ✅' : 'Not yet ❌'}
-      `, { parse_mode: 'Markdown' });
-    }
+    `, { parse_mode: 'Markdown' });
     return;
   }
 
@@ -289,18 +167,12 @@ ${summary.weakAreas?.map(a => `• ${a}`).join('\n') || 'None'}
 ━━━━━━━━━━━━━━
 Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
 Rules: ${knowledge.rules?.length || 0}
-Board rules: ${knowledge.boardRules ? '✅ Learned' : '❌ Not learned'}
 Intents: ${knowledge.intents?.length || 0}
 Amharic phrases: ${knowledge.writingStyle?.amharic?.length || 0}
-Admin patterns: ${knowledge.adminPatterns?.length || 0}
 Last updated: ${knowledge.lastUpdated || 'Never'}
 
 Top rules:
 ${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'None yet'}
-
-Board rules:
-Price: ${knowledge.boardRules?.price || '?'} ብር
-Slots: ${knowledge.boardRules?.maxSlots || 100}
     `, { parse_mode: 'Markdown' });
     return;
   }
@@ -313,29 +185,39 @@ Slots: ${knowledge.boardRules?.maxSlots || 100}
     await bot.sendMessage(chatId, `
 🔢 *TOKEN USAGE*
 ━━━━━━━━━━━━━━
-🧠 *NVIDIA DeepSeek V4 Flash*
+🧠 *NVIDIA DeepSeek*
   • Calls: ${ds.calls.toLocaleString()}
-  • Input:  ${ds.input.toLocaleString()} tokens
-  • Output: ${ds.output.toLocaleString()} tokens
-  • Total:  ${ds.total.toLocaleString()} tokens
+  • Total: ${ds.total.toLocaleString()} tokens
 
 ⚡ *Groq*
   • Calls: ${gr.calls.toLocaleString()}
-  • Input:  ${gr.input.toLocaleString()} tokens
-  • Output: ${gr.output.toLocaleString()} tokens
-  • Total:  ${gr.total.toLocaleString()} tokens
+  • Total: ${gr.total.toLocaleString()} tokens
 
 📊 *Grand Total: ${(ds.total + gr.total).toLocaleString()} tokens*
-━━━━━━━━━━━━━━
-_Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
     `, { parse_mode: 'Markdown' });
     return;
   }
 
   // ── HISTORY ──
   if (text === '/history') {
-    const history = await getHistory(10);
-    await bot.sendMessage(chatId, `📜 Last 10 days: ${history.length} messages saved in DB`);
+    const history = await getHistory(5);
+    await bot.sendMessage(chatId, `📜 Last 5 days: ${history.length} messages in DB`);
+    return;
+  }
+
+  // ── CLEANUP MANUAL ──
+  if (text === '/cleanup') {
+    const cleaned = await cleanupOldData();
+    await bot.sendMessage(chatId, `
+🗑️ *CLEANUP DONE*
+━━━━━━━━━━━━━━
+History: ${cleaned.history} deleted
+Board edits: ${cleaned.boardEdits} deleted
+Deleted msgs: ${cleaned.deletedMessages} deleted
+Board msgs: ${cleaned.boardMessages} deleted
+Action logs: ${cleaned.actionLogs} deleted
+QA pairs: ${cleaned.qaPairs} deleted
+    `, { parse_mode: 'Markdown' });
     return;
   }
 
@@ -345,29 +227,23 @@ _Bot restart ቢሆን DB ውስጥ ይቆያል ✅_
 ━━━━━━━━━━━━━━
 /on — Bot ያብራ
 /off — Bot ያጥፋ
-/threshold <0-1> — Confidence threshold ቀይር
+/threshold <0-1> — Confidence threshold
 /ratingon — Rating ያብራ ⭐
 /ratingoff — Rating ያጥፋ 🔕
 /status — Bot status
-/board — Board ወደ group ልካ
-/boardpreview — Board preview (private)
-/update <num> <name> <paid|pending|open> — Slot ቀይር
-/pay <num> — ክፍያ confirm
-/remove <num> — Slot አውጣ
-/clearboard — ሁሉም ሰር
 /list — የተመዘገቡ ዝርዝር
 /summary — Learning summary
 /knowledge — Knowledge base
 /history — History stats
 /tokens — Token usage
 /announce <text> — Announcement
+/cleanup — Manual cleanup
   `, { parse_mode: 'Markdown' });
 }
 
 // ============================================================
 // 👥 GROUP HANDLER
 // ============================================================
-
 let CONFIDENCE_THRESHOLD = parseFloat(process.env.CONFIDENCE_THRESHOLD || '0.50');
 
 async function handleGroupMessage(bot, msg) {
@@ -378,31 +254,19 @@ async function handleGroupMessage(bot, msg) {
   const isAdminMessage = userId === ADMIN_ID;
 
   msg._isAdmin = isAdminMessage;
-
   await saveHistory(msg);
 
-  // ── PHOTO MESSAGE — board ሊሆን ይችላል ──
+  // ── ADMIN PHOTO ──
   if (msg.photo) {
     if (isAdminMessage) {
       const caption = msg.caption || '';
-
-      // Caption ን ይማራል
       if (caption) {
         learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
         learnLotteryRules(caption).catch(() => {});
       }
-
-      // Caption board text ካለ → parse + learn
-      if (caption && caption.includes('#')) {
-        await learnFromBoard(caption, '').catch(err =>
-          console.error('[BOARD] Caption parse error:', err.message)
-        );
-        await alertAdmin(bot, '📋 Board (caption) ተማረ ✅', 'SUCCESS');
-      }
-
       learningEvents.emit('activity', {
         type: 'learn',
-        msg: `📷 Admin photo ተላከ${caption ? ' + caption learned' : ''}`
+        msg: `📷 Admin photo${caption ? ' + caption learned' : ''}`
       });
     }
     return;
@@ -410,50 +274,48 @@ async function handleGroupMessage(bot, msg) {
 
   // ── ADMIN MESSAGE ──
   if (isAdminMessage) {
-    // Board text ይልካል (# ብዛት > 5 ካለ → board ነው)
-    const hashCount = (text.match(/#/g) || []).length;
-    if (hashCount >= 5) {
-      learnFromBoard(text, '').catch(err =>
-        console.error('[BOARD] Text parse error:', err.message)
-      );
-      await alertAdmin(bot, '📋 Board text ተማረ ✅', 'SUCCESS');
-    }
-
-    // ── Q&A PAIR LEARNING — admin reply to user ──
-    // Admin ሰውን reply ሲያደርግ → user question + admin answer pair ይማራል
+    // Admin reply to user → Q&A pair ይማራል
     if (msg.reply_to_message) {
       const repliedMsg = msg.reply_to_message;
       const userText = repliedMsg.text || '';
       const repliedUserId = repliedMsg.from?.id;
 
-      // Admin ራሱን reply አላደረገም + user message ካለ
       if (repliedUserId !== ADMIN_ID && userText) {
         addToBuffer(
-          { text: `[BOT_CORRECTION] Bot ተሳስቷል። User ጠየቀ: "${userText}" — ትክክለኛ መልስ: "${text}"` },
+          { text: `[BOT_CORRECTION] User ጠየቀ: "${userText}" — ትክክለኛ መልስ: "${text}"` },
           true,
           null
         );
         learningEvents.emit('activity', {
           type: 'learn',
-          msg: `💬 Correction buffered — "${userText.slice(0, 30)}" → "${text.slice(0, 30)}"`
+          msg: `💬 Correction — "${userText.slice(0, 30)}" → "${text.slice(0, 30)}"`
         });
       }
     }
 
-    // Batch buffer ያስቀምጣል
+    // Admin board ሲልክ → message_id ያስቀምጣል
+    // Board detect: ቁጥሮች ብዙ ወይም # ብዙ ካለ
+    const hashCount = (text.match(/#/g) || []).length;
+    if (hashCount >= 5) {
+      // ይህ message board ነው — id ያስቀምጣል
+      // message_id ወዲያው ስለሌለ sent message ን እንጠብቃለን
+      // bot.on('message') ውስጥ ስለሆነ msg.message_id አለ
+      await saveBoardMessage(msg.message_id, chatId, text).catch(() => {});
+      learningEvents.emit('activity', {
+        type: 'learn',
+        msg: `📋 Board message saved — ID: ${msg.message_id}`
+      });
+    }
+
     addToBuffer(msg, true);
-    learnLotteryRules(text).catch(err =>
-      console.error('[RULES] Error:', err.message)
-    );
+    learnLotteryRules(text).catch(() => {});
+    learnFromMessage(msg, true).catch(() => {});
     return;
   }
 
-  // ── USER MESSAGE — bot off ከሆነ ሁሉም ዝም ──
+  // ── USER MESSAGE — bot off ከሆነ ዝም ──
   const isOn = await getBotState();
   if (!isOn) return;
-
-// (ምንም አይጨምር — ይጥላል ብቻ)
-
 
   // ── REGISTRATION CHECK ──
   const registrationMatch = text.match(/(\d+)/);
@@ -474,7 +336,11 @@ async function handleGroupMessage(bot, msg) {
 
   // ── GENERATE RESPONSE ──
   try {
-    const result = await generateResponse(text, userId, username);
+    // Current board text ያወጣል
+    const boardMsg = await getBoardMessage();
+    const currentBoardText = boardMsg?.text || '';
+
+    const result = await generateResponse(text, userId, username, currentBoardText);
 
     if (result.confidence >= CONFIDENCE_THRESHOLD) {
       const sentMsg = await bot.sendMessage(chatId, result.response, {
@@ -483,8 +349,7 @@ async function handleGroupMessage(bot, msg) {
 
       addToBuffer(msg, false, result.response);
 
-
-      // Rating buttons — admin ብቻ ያያቸዋል (private alert)
+      // Rating
       const ratingId = `rate_${sentMsg.message_id}_${Date.now()}`;
       pendingRatings.set(ratingId, {
         userText: text,
@@ -496,29 +361,21 @@ async function handleGroupMessage(bot, msg) {
       if (ratingEnabled) {
         await alertAdmin(
           bot,
-          `🤖 Bot ተናገረ — Rate ስጠው:\n\n👤 @${username}: "${text}"\n🤖 Bot: "${result.response}"`,
+          `🤖 Bot ተናገረ:\n👤 @${username}: "${text}"\n🤖 Bot: "${result.response}"`,
           'INFO'
         );
         await bot.sendMessage(ADMIN_ID, '⭐ Rating:', {
           reply_markup: {
             inline_keyboard: [[
-              { text: '👎 ዝቅተኛ', callback_data: `${ratingId}:1` },
-              { text: '😐 መካከለኛ', callback_data: `${ratingId}:2` },
-              { text: '👍 አሪፍ', callback_data: `${ratingId}:3` },
-              { text: '🔥 በጣም አሪፍ', callback_data: `${ratingId}:4` },
+              { text: '👎', callback_data: `${ratingId}:1` },
+              { text: '😐', callback_data: `${ratingId}:2` },
+              { text: '👍', callback_data: `${ratingId}:3` },
+              { text: '🔥', callback_data: `${ratingId}:4` },
             ], [
               { text: '🔕 Rating አጥፋ', callback_data: 'toggle_rating:off' },
             ]]
           }
         });
-      }
-
-      if (result.wasCorrected) {
-        await alertAdmin(
-          bot,
-          `🔄 Response ተስተካከለ (${result.correctionRounds} rounds) → ${Math.round(result.confidence * 100)}% ✅`,
-          'INFO'
-        );
       }
     } else {
       // Low confidence → admin approval
@@ -533,7 +390,7 @@ async function handleGroupMessage(bot, msg) {
       });
       await alertAdmin(
         bot,
-        `⚠️ *Low confidence* (${Math.round(result.confidence * 100)}%) after ${result.correctionRounds} rounds\n\n` +
+        `⚠️ *Low confidence* (${Math.round(result.confidence * 100)}%)\n\n` +
         `@${username}: "${text}"\n\nBot: "${result.response}"\n\n` +
         `/approve_${pendingId} ✅ | /reject_${pendingId} ❌`,
         'WARNING'
@@ -550,25 +407,14 @@ async function handleLotteryRegistration(bot, msg, userId, username, requestedNu
     const result = await handleRegistration(userId, username, requestedNumber);
 
     if (result.available) {
-      // DB ምዝገባ
       const regResult = await registerMember(userId, username, requestedNumber);
       if (regResult.success) {
-        // Board state ያዘምናል
-        const boardState = await getBoardState().catch(() => ({ slots: {} }));
-        boardState.slots = boardState.slots || {};
-        boardState.slots[requestedNumber] = {
-          number: requestedNumber,
-          name: username,
-          status: 'pending'
-        };
-        await updateBoardState(boardState);
-
         await bot.sendMessage(chatId, result.response, {
           reply_to_message_id: msg.message_id
         });
         await alertAdmin(
           bot,
-          `✅ @${username} → ቁጥር ${requestedNumber} ⏳\n/pay ${requestedNumber} — ክፍያ ሲረጋገጥ`,
+          `✅ @${username} → ቁጥር ${requestedNumber} ⏳`,
           'INFO'
         );
       }
@@ -582,14 +428,13 @@ async function handleLotteryRegistration(bot, msg, userId, username, requestedNu
   }
 }
 
-
 // ============================================================
 // ⭐ RATING SYSTEM
 // ============================================================
 let ratingEnabled = true;
 const pendingRatings = new Map();
 const RATING_LABELS = { 1: "👎 ዝቅተኛ", 2: "😐 መካከለኛ", 3: "👍 አሪፍ", 4: "🔥 በጣም አሪፍ" };
-const RATING_CONFIDENCE = { 1: -0.3, 2: 0.0, 3: 0.2, 4: 0.4 };
+
 // ============================================================
 // 🗄️ INIT DB
 // ============================================================
@@ -620,18 +465,10 @@ app.get('/', (req, res) => {
   .stat-value { font-size:32px; font-weight:700; color:#00ff9d; }
   .stat-sub { font-size:11px; color:#4a5568; margin-top:2px; }
   .confidence { background:#11111a; border:1px solid #1e1e2e; border-radius:10px; padding:16px; margin-bottom:24px; }
-  .conf-label { font-size:10px; color:#4a5568; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px; }
   .conf-bar { height:8px; background:#1e1e2e; border-radius:4px; overflow:hidden; }
   .conf-fill { height:100%; border-radius:4px; background:linear-gradient(90deg,#00ff9d,#7c3aed); transition:width 1s ease; }
   .conf-pct { font-size:28px; font-weight:700; color:#00ff9d; margin-top:6px; }
-  .ready { font-size:13px; margin-top:8px; }
-  .board-grid { display:grid; grid-template-columns:repeat(10,1fr); gap:4px; margin-bottom:24px; }
-  .slot { background:#11111a; border:1px solid #1e1e2e; border-radius:6px; padding:6px 4px; text-align:center; font-size:10px; cursor:default; }
-  .slot.paid { border-color:#00ff9d; background:#001a0d; color:#00ff9d; }
-  .slot.pending { border-color:#f59e0b; background:#1a1200; color:#f59e0b; }
-  .slot.open { color:#2d3748; }
   .log-box { background:#070710; border:1px solid #1e1e2e; border-radius:10px; padding:16px; height:280px; overflow-y:auto; }
-  .log-title { font-size:10px; color:#00ff9d; text-transform:uppercase; letter-spacing:2px; margin-bottom:12px; }
   .log-entry { font-size:12px; line-height:1.9; display:flex; gap:10px; }
   .t { color:#4a5568; min-width:80px; }
   .learn { color:#00ff9d; }
@@ -639,7 +476,6 @@ app.get('/', (req, res) => {
   .rule { color:#ff6b35; }
   .error { color:#ff4757; }
   .dot { width:8px; height:8px; border-radius:50%; background:#00ff9d; display:inline-block; margin-right:6px; animation:blink 1.5s infinite; }
-  .section-title { font-size:10px; color:#4a5568; text-transform:uppercase; letter-spacing:2px; margin-bottom:10px; }
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
   ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-track{background:#1e1e2e} ::-webkit-scrollbar-thumb{background:#00ff9d;border-radius:2px}
 </style>
@@ -665,29 +501,26 @@ app.get('/', (req, res) => {
     <div class="stat-sub">user patterns</div>
   </div>
   <div class="stat">
-    <div class="stat-label">Board Slots</div>
-    <div class="stat-value" id="v5">—</div>
-    <div class="stat-sub">filled / 100</div>
+    <div class="stat-label">Board Edits</div>
+    <div class="stat-value" id="v4">—</div>
+    <div class="stat-sub">learned</div>
   </div>
   <div class="stat">
-    <div class="stat-label">Paid ✅</div>
-    <div class="stat-value" id="v6">—</div>
-    <div class="stat-sub">confirmed</div>
+    <div class="stat-label">Registered</div>
+    <div class="stat-value" id="v5">—</div>
+    <div class="stat-sub">members</div>
   </div>
 </div>
 
 <div class="confidence">
-  <div class="conf-label">Bot Confidence — Admin ሊተካ የሚችልበት ደረጃ</div>
+  <div style="font-size:10px;color:#4a5568;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px">Bot Confidence</div>
   <div class="conf-bar"><div class="conf-fill" id="confBar" style="width:0%"></div></div>
   <div class="conf-pct" id="confPct">0%</div>
-  <div class="ready" id="readyText">⏳ እየተማረ...</div>
+  <div style="font-size:13px;margin-top:8px" id="readyText">⏳ እየተማረ...</div>
 </div>
 
-<div class="section-title" style="margin-bottom:10px">📋 BOARD — Live Status</div>
-<div class="board-grid" id="boardGrid"></div>
-
 <div class="log-box">
-  <div class="log-title">⚡ Live Activity</div>
+  <div style="font-size:10px;color:#00ff9d;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">⚡ Live Activity</div>
   <div id="logs"></div>
 </div>
 
@@ -704,20 +537,6 @@ app.get('/', (req, res) => {
     if (logs.children.length > 100) logs.removeChild(logs.firstChild);
   }
 
-  function renderBoardGrid(slots) {
-    const grid = document.getElementById('boardGrid');
-    grid.innerHTML = '';
-    for (let i = 1; i <= 100; i++) {
-      const slot = slots[i];
-      const div = document.createElement('div');
-      div.className = 'slot ' + (slot?.status || 'open');
-      const emoji = slot?.status === 'paid' ? '✅' : slot?.status === 'pending' ? '⏳' : '';
-      div.textContent = String(i).padStart(2,'0') + (emoji ? ' '+emoji : '#');
-      div.title = slot?.name || 'ክፍት';
-      grid.appendChild(div);
-    }
-  }
-
   async function fetchStats() {
     try {
       const r = await fetch('/learn-status');
@@ -725,15 +544,14 @@ app.get('/', (req, res) => {
       document.getElementById('v1').textContent = d.adminPhrases || 0;
       document.getElementById('v2').textContent = d.rules || 0;
       document.getElementById('v3').textContent = d.intents || 0;
-      document.getElementById('v5').textContent = d.filledSlots || 0;
-      document.getElementById('v6').textContent = d.paidSlots || 0;
+      document.getElementById('v4').textContent = d.boardEdits || 0;
+      document.getElementById('v5').textContent = d.registered || 0;
       const pct = Math.round((d.confidence || 0) * 100);
       document.getElementById('confBar').style.width = pct + '%';
       document.getElementById('confPct').textContent = pct + '%';
       document.getElementById('readyText').textContent = d.readyToReplace
         ? '✅ Admin ሊተካ ይችላል!'
         : '⏳ እየተማረ... ' + pct + '%';
-      if (d.boardSlots) renderBoardGrid(d.boardSlots);
     } catch(e) { addLog('error', 'Stats fetch failed'); }
   }
 
@@ -743,7 +561,7 @@ app.get('/', (req, res) => {
     addLog(d.type, d.msg);
     if (d.type !== 'ping') fetchStats();
   };
-  es.onerror = () => addLog('error', 'Connection lost, reconnecting...');
+  es.onerror = () => addLog('error', 'Reconnecting...');
 
   fetchStats();
   setInterval(fetchStats, 15000);
@@ -760,22 +578,18 @@ app.get('/health', (req, res) => {
 app.get('/learn-status', async (req, res) => {
   try {
     const knowledge = await readKnowledge();
-    const boardState = await getBoardState().catch(() => null);
-    const slots = boardState?.slots || {};
-    const filledSlots = Object.values(slots).filter(s => s.name).length;
-    const paidSlots = Object.values(slots).filter(s => s.status === 'paid').length;
+    const lotteryList = await getLotteryList();
+    const edits = await query(`SELECT COUNT(*) FROM board_edits`);
 
     res.json({
       adminPhrases: knowledge.adminStyle?.responses?.length || 0,
       rules: knowledge.rules?.length || 0,
       intents: knowledge.intents?.length || 0,
-      writingStyle: knowledge.writingStyle?.commonPhrases?.length || 0,
+      boardEdits: parseInt(edits.rows[0]?.count) || 0,
+      registered: lotteryList.length,
       confidence: knowledge.confidence || 0,
       readyToReplace: knowledge.readyToReplace || false,
       lastUpdated: knowledge.lastUpdated || null,
-      filledSlots,
-      paidSlots,
-      boardSlots: slots,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -815,6 +629,7 @@ const GROUP_ID = process.env.GROUP_CHAT_ID;
 
 console.log('🤖 Lottery Bot starting...');
 
+// ── REGULAR MESSAGES ──
 bot.on('message', async (msg) => {
   try {
     const chatId = msg.chat.id;
@@ -824,7 +639,6 @@ bot.on('message', async (msg) => {
     // ── PRIVATE (admin) ──
     if (msg.chat.type === 'private') {
       if (isAdmin(userId)) {
-        // Approve/Reject pending
         if (text.startsWith('/approve_')) {
           const pendingId = text.replace('/approve_', '');
           const pending = pendingResponses.get(pendingId);
@@ -833,9 +647,9 @@ bot.on('message', async (msg) => {
               reply_to_message_id: pending.messageId,
             });
             pendingResponses.delete(pendingId);
-            await bot.sendMessage(ADMIN_ID, '✅ Response sent to group');
+            await bot.sendMessage(ADMIN_ID, '✅ Response sent');
           } else {
-            await bot.sendMessage(ADMIN_ID, '❌ Pending response not found or expired');
+            await bot.sendMessage(ADMIN_ID, '❌ Not found or expired');
           }
           return;
         }
@@ -843,14 +657,7 @@ bot.on('message', async (msg) => {
         if (text.startsWith('/reject_')) {
           const pendingId = text.replace('/reject_', '');
           pendingResponses.delete(pendingId);
-          await bot.sendMessage(ADMIN_ID, '🗑️ Response rejected');
-          return;
-        }
-
-        // Admin photo ለ board learning (private ውስጥ ቢልክ)
-        if (msg.photo && msg.caption?.includes('#')) {
-          await learnFromBoard(msg.caption, '');
-          await bot.sendMessage(chatId, '📋 Board ተማረ ✅');
+          await bot.sendMessage(ADMIN_ID, '🗑️ Rejected');
           return;
         }
 
@@ -867,17 +674,79 @@ bot.on('message', async (msg) => {
     }
 
   } catch (err) {
-    console.error('[BOT] Unhandled error:', err.message);
-    await alertAdmin(bot, `🚨 Unhandled error: ${err.message}`, 'ERROR').catch(() => {});
+    console.error('[BOT] Error:', err.message);
+    await alertAdmin(bot, `🚨 Error: ${err.message}`, 'ERROR').catch(() => {});
   }
 });
 
+// ── EDITED MESSAGES — admin manually edit ሲያደርግ ──
+bot.on('edited_message', async (msg) => {
+  try {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id;
+
+    // Group ውስጥ ብቻ
+    if (String(chatId) !== String(GROUP_ID) && msg.chat.type !== 'supergroup') return;
+
+    const afterText = msg.text || '';
+    const messageId = msg.message_id;
+
+    // DB ውስጥ ካለ before text ያወጣል
+    const boardMsg = await getBoardMessage();
+    const beforeText = boardMsg?.message_id === messageId
+      ? boardMsg.text
+      : null;
+
+    // Edit ያስቀምጣል
+    await saveBoardEdit(messageId, chatId, beforeText, afterText);
+
+    // Board message text ያዘምናል
+    if (boardMsg?.message_id === messageId) {
+      await updateBoardMessageText(messageId, afterText);
+    }
+
+    // DeepSeek background ሆኖ ይማራል
+    setImmediate(() => {
+      learnFromEdit(messageId, beforeText, afterText)
+        .catch(err => console.error('[EDIT] Learn error:', err.message));
+    });
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `✏️ Edit detected — message ${messageId}`
+    });
+
+    // Admin alert
+    if (isAdmin(userId)) {
+      await alertAdmin(
+        bot,
+        `✏️ Board edit detected — learning...\nMsg ID: ${messageId}`,
+        'INFO'
+      );
+    }
+
+  } catch (err) {
+    console.error('[EDIT] Handler error:', err.message);
+  }
+});
+
+// ── DELETED MESSAGES — Telegram channel_post delete ──
+// Note: Telegram bot API ን delete event ቀጥታ አይሰጥም
+// Admin delete ሲያደርግ → message_id ብቻ ይሰጣል
+// ስለዚህ ሁሉም messages DB ውስጥ ይቀምጣሉ — delete detect ለማድረግ
+bot.on('message', async (msg) => {
+  // Already handled above — this is just for logging
+});
+
+// ============================================================
+// ⭐ CALLBACK QUERIES
+// ============================================================
 bot.on('callback_query', async (query) => {
   const data = query.data;
   const userId = query.from?.id;
 
   if (!isAdmin(userId)) {
-    await bot.answerCallbackQuery(query.id, { text: 'Admin ብቻ ነው 🚫' });
+    await bot.answerCallbackQuery(query.id, { text: 'Admin ብቻ 🚫' });
     return;
   }
 
@@ -904,8 +773,6 @@ bot.on('callback_query', async (query) => {
 
   // ── RATING SUBMIT ──
   if (data.startsWith('rate_')) {
-   
-    // rsplit አይሰራም — split እንጠቀም
     const lastColon = data.lastIndexOf(':');
     const rId = data.substring(0, lastColon);
     const score = parseInt(data.substring(lastColon + 1));
@@ -917,58 +784,65 @@ bot.on('callback_query', async (query) => {
     }
 
     const label = RATING_LABELS[score] || '?';
-    const confidenceAdj = RATING_CONFIDENCE[score] || 0;
 
-    // DeepSeek ያስተምራል — rating aware
-    learnFromRating(
-      pending.userText,
-      pending.botResponse,
-      score
-    ).then(() => {
-      learningEvents.emit('activity', {
-        type: score >= 3 ? 'learn' : 'eval',
-        msg: `⭐ Rating: ${label} — "${pending.userText.slice(0, 30)}"`
-      });
-    }).catch(() => {});
+    learnFromRating(pending.userText, pending.botResponse, score)
+      .then(() => {
+        learningEvents.emit('activity', {
+          type: score >= 3 ? 'learn' : 'eval',
+          msg: `⭐ Rating: ${label} — "${pending.userText.slice(0, 30)}"`
+        });
+      }).catch(() => {});
 
     pendingRatings.delete(rId);
 
-    // Button ያስወግዳል
     await bot.editMessageReplyMarkup(
-      { inline_keyboard: [[{ text: `✅ ${label} ተሰጠ`, callback_data: 'done' }]] },
+      { inline_keyboard: [[{ text: `✅ ${label}`, callback_data: 'done' }]] },
       { chat_id: query.message.chat.id, message_id: query.message.message_id }
     );
-    await bot.answerCallbackQuery(query.id, { text: `${label} — DeepSeek ተማረ! ✅` });
+    await bot.answerCallbackQuery(query.id, { text: `${label} ✅` });
     return;
   }
 
   await bot.answerCallbackQuery(query.id);
 });
 
+// ============================================================
+// ⏰ CRON JOBS
+// ============================================================
 
-// ── 24hr Deep Learning — ሌሊት 11 PM ──
+// ── ሌሊት 11 PM — Deep Learning + Cleanup ──
 cron.schedule('0 23 * * *', async () => {
   try {
     await alertAdmin(bot, '🌙 24hr Deep Learning እየጀመረ...', 'INFO');
+
+    // 1. Deep Learning
     const result = await deepNightLearning();
     if (result) {
       await bot.sendMessage(
         ADMIN_ID,
-        `🌙 *24HR DEEP LEARNING ተጠናቀቀ!*\n━━━━━━━━━━━━━━\n` +
+        `🌙 *DEEP LEARNING ተጠናቀቀ!*\n━━━━━━━━━━━━━━\n` +
         `📚 ${result.dailySummary}\n\n` +
-        `🎯 Patterns learned: ${result.totalPatternsLearned}\n` +
-        `💪 New confidence: ${Math.round((result.newConfidence || 0) * 100)}%\n` +
-        `⚠️ Gaps: ${result.gaps?.slice(0, 3).join(', ') || 'None'}\n` +
-        `🚀 Ready: ${result.readyToReplace ? 'YES ✅' : 'Not yet'}`,
+        `🎯 Patterns: ${result.totalPatternsLearned}\n` +
+        `💪 Confidence: ${Math.round((result.newConfidence || 0) * 100)}%\n` +
+        `⚠️ Gaps: ${result.gaps?.slice(0, 3).join(', ') || 'None'}`,
         { parse_mode: 'Markdown' }
       );
     }
+
+    // 2. Cleanup — 5 ቀን ያለፈ raw data ያጠፋ
+    const cleaned = await cleanupOldData();
+    await alertAdmin(
+      bot,
+      `🗑️ Cleanup done:\nHistory: ${cleaned.history} | Edits: ${cleaned.boardEdits} | QA: ${cleaned.qaPairs}`,
+      'INFO'
+    );
+
   } catch (err) {
-    console.error('[CRON] Night learning error:', err.message);
+    console.error('[CRON] Night error:', err.message);
   }
 });
 
-// ── Daily summary — 9 PM ──
+// ── 9 PM — Daily Summary ──
 cron.schedule('0 21 * * *', async () => {
   try {
     const summary = await generateLearningSummary();
@@ -977,7 +851,7 @@ cron.schedule('0 21 * * *', async () => {
         ADMIN_ID,
         `📊 *DAILY REPORT*\n━━━━━━━━━━━━━━\n${summary.summary}\n\n` +
         `💪 Confidence: ${Math.round(summary.confidence * 100)}%\n` +
-        `🎯 Ready to replace: ${summary.readyToReplace ? 'YES ✅' : 'Not yet'}`,
+        `🎯 Ready: ${summary.readyToReplace ? 'YES ✅' : 'Not yet'}`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -990,17 +864,13 @@ cron.schedule('0 21 * * *', async () => {
 bot.getMe().then(async (me) => {
   console.log(`✅ Bot started: @${me.username}`);
   const nvidiaOk = await testNvidiaConnection();
-  if (!nvidiaOk) {
-    console.warn('⚠️ NVIDIA connection failed');
-  }
   await alertAdmin(
     bot,
-    `✅ Bot started!\n@${me.username} is online.\n\n` +
-    `🧠 NVIDIA DeepSeek: ${nvidiaOk ? '✅ Online' : '❌ Offline'}\n\nType /status`,
+    `✅ Bot started!\n@${me.username} online.\n🧠 NVIDIA: ${nvidiaOk ? '✅' : '❌'}`,
     'SUCCESS'
   );
 }).catch(err => {
-  console.error('❌ Bot failed to start:', err.message);
+  console.error('❌ Bot failed:', err.message);
   process.exit(1);
 });
 
