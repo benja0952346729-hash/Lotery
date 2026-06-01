@@ -228,19 +228,11 @@ export async function decideBotAction(userMessage, username, currentBoardText) {
   const deletions = await getDeletedMessages(10);
 
   const prompt = `
-You are an AI that decides what action a Telegram lottery bot should take.
+You are an AI that manages an Amharic Telegram lottery group AUTONOMOUSLY.
+You learned everything from watching the admin.
 
-You have learned from watching the admin manually manage the board.
-
-Actions learned from admin edits:
-${edits.slice(0, 10).map(e =>
-  `- Changed: "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
-).join('\n') || 'None yet'}
-
-Actions learned from admin deletions:
-${deletions.slice(0, 5).map(d =>
-  `- Deleted: "${d.text?.slice(0, 30)}"`
-).join('\n') || 'None yet'}
+Board structure learned from admin:
+${knowledge.boardTemplate || edits.slice(0, 3).map(e => e.after_text || e.before_text).join('\n---\n') || 'None yet'}
 
 Rules learned:
 ${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
@@ -257,13 +249,16 @@ ${currentBoardText || '(no board yet)'}
 
 User message: "@${username}: ${userMessage}"
 
-Decide what action to take. Return ONLY valid JSON:
+Decide what to do.
+If action is "send_board" — create FULL board text exactly like admin does.
+
+Return ONLY valid JSON:
 {
-  "action": "edit_board | delete_and_repost | respond_only | register_slot | confirm_payment | no_action",
+  "action": "send_board | register_slot | respond_only | no_action",
   "slotNumber": null,
   "newName": null,
-  "newStatus": null,
-  "responseText": "Amharic response to send",
+  "boardText": "FULL board text if action is send_board, else null",
+  "responseText": "Amharic response to send to user",
   "reason": "why this action",
   "confidence": 0.85,
   "shouldAct": true
