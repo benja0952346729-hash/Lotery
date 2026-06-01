@@ -44,7 +44,7 @@ async function callDeepSeek(prompt, retries = 3) {
       const completion = await client.chat.completions.create({
         model: 'deepseek-ai/deepseek-v4-flash',
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 1000,
+        max_tokens: 2048,
         temperature: 0.7,
       });
       await trackTokens(
@@ -1142,7 +1142,7 @@ Return ONLY valid JSON:
           ],
         },
       ],
-      max_tokens: 1000,
+      max_tokens: 2048,
       temperature: 0.3,
     });
 
@@ -1210,4 +1210,4 @@ Return ONLY valid JSON:
 
     return null;
   }
-}
+    }
