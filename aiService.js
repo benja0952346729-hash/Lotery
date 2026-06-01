@@ -584,7 +584,9 @@ async function buildSystemPrompt(currentBoardText = '') {
   const actionLogs = await getActionLogs(0.6);
   const edits = await getBoardEdits(10);
 
-  return `You are ${BOT_NAME}, admin of an Amharic Telegram lottery group. Respond EXACTLY like the real admin.
+  return `You are ${BOT_NAME}, admin of an Amharic Telegram lottery group.
+Respond EXACTLY like the real admin learned from their actions.
+You must also decide what ACTION to take based on what you learned.
 
 ADMIN STYLE:
 - Phrases: ${knowledge.adminStyle?.responses?.slice(0, 15).join(' | ') || 'friendly'}
@@ -648,21 +650,51 @@ export async function generateResponse(userMessage, userId, username, currentBoa
   }
 
   const systemPrompt = await buildSystemPrompt(currentBoardText);
+  const intentPrompt = systemPrompt + `
+
+User message: "${username}: ${userMessage}"
+Current board: """${currentBoardText || 'none'}"""
+
+Decide the ACTION and RESPONSE. Return ONLY valid JSON:
+{
+  "intent": "register | check_availability | greeting | payment | question | other",
+  "slotNumber": null,
+  "action": "register_slot | edit_board | respond_only | check_slot",
+  "response": "Amharic response exactly like admin",
+  "confidence": 0.9
+}`;
+
   const messages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: `${username}: ${userMessage}` },
+    { role: 'user', content: intentPrompt },
   ];
 
-  const response = await callGroq(messages);
+  const raw = await callGroq(messages);
+
+  let parsed;
+  try {
+    const clean = raw.replace(/\`\`\`json|\`\`\`/g, '').trim();
+    parsed = JSON.parse(clean);
+  } catch {
+    // JSON parse ካልሆነ → text response ብቻ
+    parsed = {
+      intent: 'other',
+      action: 'respond_only',
+      response: raw,
+      confidence: 0.7,
+    };
+  }
 
   setImmediate(() => {
-    deepSeekBackgroundLearn(userMessage, response, `User: ${username}`)
+    deepSeekBackgroundLearn(userMessage, parsed.response, `User: ${username}, Intent: ${parsed.intent}`)
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
   });
 
   return {
-    response,
-    confidence: 1.0,
+    response: parsed.response,
+    intent: parsed.intent,
+    action: parsed.action,
+    slotNumber: parsed.slotNumber,
+    confidence: parsed.confidence || 1.0,
     fromCache: false,
   };
 }
