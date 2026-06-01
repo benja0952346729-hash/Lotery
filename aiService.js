@@ -1069,3 +1069,137 @@ Return ONLY valid JSON:
     return null;
   }
 }
+
+// ─────────────────────────────────────────
+// 📷 ANALYZE PHOTO
+// Bot photo ሲያይ → Vision AI ይጠቀማል
+// ምን አይነት photo እንደሆነ ራሱ ይወስናል
+// ቀስ በቀስ ከ context ይማራል — hardcode የለም
+// ─────────────────────────────────────────
+export async function analyzePhoto(base64Image, caption = '', username = '', context = '') {
+  const knowledge = await readKnowledge();
+
+  try {
+    const key = getNextDeepSeekKey();
+    const client = new OpenAI({
+      apiKey: key,
+      baseURL: 'https://integrate.api.nvidia.com/v1',
+    });
+
+    const completion = await client.chat.completions.create({
+      model: 'deepseek-ai/deepseek-v4-flash',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
+              },
+            },
+            {
+              type: 'text',
+              text: `
+You are an AI analyzing a photo sent in an Amharic Telegram lottery group.
+
+Caption: "${caption || '(none)'}"
+Sent by: @${username}
+Context: ${context}
+
+What you know about this group:
+- Rules: ${knowledge.rules?.slice(0, 10).join(', ') || 'learning...'}
+- Admin phrases: ${knowledge.adminStyle?.responses?.slice(0, 5).join(', ') || 'learning...'}
+
+Look at the photo carefully. DO NOT assume — analyze what you actually see.
+
+Return ONLY valid JSON:
+{
+  "photoType": "what type of photo this is (describe naturally)",
+  "extractedText": "any text visible in the photo",
+  "meaning": "what this photo means in context of this group",
+  "suggestedAction": "what the bot should do based on this photo",
+  "keyDetails": {
+    "amount": null,
+    "name": null,
+    "number": null,
+    "bank": null,
+    "other": null
+  },
+  "confidence": 0.8,
+  "shouldLearn": true,
+  "ruleToLearn": "any rule to remember from this photo, or null"
+}`,
+            },
+          ],
+        },
+      ],
+      max_tokens: 1000,
+      temperature: 0.3,
+    });
+
+    await trackTokens(
+      'nvidia-deepseek',
+      completion.usage?.prompt_tokens || 0,
+      completion.usage?.completion_tokens || 0
+    );
+
+    const raw = completion.choices[0]?.message?.content || '';
+    const clean = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    // ከ photo ተምሮ rule ያስቀምጣል
+    if (parsed.shouldLearn && parsed.ruleToLearn) {
+      await updateKnowledge({ rules: [parsed.ruleToLearn] });
+    }
+
+    // Context ለ background learning ያስቀምጣል
+    if (parsed.meaning) {
+      setImmediate(() => {
+        deepSeekBackgroundLearn(
+          `[PHOTO] ${caption || parsed.photoType}`,
+          parsed.meaning,
+          `Photo from @${username}: ${parsed.extractedText?.slice(0, 100) || ''}`
+        ).catch(() => {});
+      });
+    }
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `📷 Photo analyzed — ${parsed.photoType?.slice(0, 50)} (${Math.round((parsed.confidence || 0) * 100)}%)`
+    });
+
+    return parsed;
+
+  } catch (err) {
+    // Vision ካልሰራ → caption ብቻ ይጠቀማል
+    console.error('[PHOTO] Vision error:', err.message);
+
+    if (caption) {
+      const fallback = await callDeepSeek(`
+You are an AI in an Amharic lottery Telegram group.
+A photo was sent with caption: "${caption}" by @${username}
+What does this mean? What should the bot do?
+Return ONLY valid JSON:
+{
+  "photoType": "unknown - caption only",
+  "extractedText": "${caption}",
+  "meaning": "inferred from caption",
+  "suggestedAction": "respond_only",
+  "keyDetails": { "amount": null, "name": null, "number": null, "bank": null, "other": null },
+  "confidence": 0.4,
+  "shouldLearn": false,
+  "ruleToLearn": null
+}`);
+
+      try {
+        const clean = fallback.replace(/```json|```/g, '').trim();
+        return JSON.parse(clean);
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+}
