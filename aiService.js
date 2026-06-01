@@ -782,10 +782,20 @@ Return ONLY valid JSON:
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
+    // confidence validate — 0-1 መካከል መሆን አለበት
+    let rawConf = parsed.confidence || 0;
+    if (rawConf > 1) rawConf = rawConf / 100; // 75 → 0.75, 61 → 0.61
+    const finalConfidence = rawConf > 0 ? rawConf : (
+      rulesCount > 50 ? 0.85 :
+      rulesCount > 30 ? 0.70 :
+      rulesCount > 15 ? 0.55 :
+      rulesCount > 5  ? 0.35 : 0.15
+    );
     await updateKnowledge({
-      confidence: parsed.confidence,
+      confidence: finalConfidence,
       readyToReplace: parsed.readyToReplace || false,
     });
+    parsed.confidence = finalConfidence;
 
     learningEvents.emit('activity', {
       type: 'learn',
