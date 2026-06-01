@@ -352,8 +352,10 @@ async function handleGroupMessage(bot, msg) {
     // Bot AI ተምሮ ሲወስን ራሱ ይልካል — copy አያደርግም
     const hashCount = (text.match(/#/g) || []).length;
     if (hashCount >= 5) {
-      const existingBoard = await getBoardMessage();
-
+    const existingBoard = await getBoardMessage();
+    await updateKnowledge({ boardTemplate: text });
+  await saveBoardMessage(msg.message_id, chatId, text);
+      
       // አሮጌ board ካለ pattern ይማራል
       if (existingBoard?.message_id && existingBoard.message_id !== msg.message_id) {
         setImmediate(() => {
@@ -435,28 +437,19 @@ async function handleGroupMessage(bot, msg) {
 
     // Send board — AI ተምሮ ሲወስን ራሱ ይልካል
     if (result.action === 'send_board') {
-      const lastBoard = await getBoardMessage();
-      if (lastBoard?.text) {
-        const sent = await bot.sendMessage(chatId, lastBoard.text);
-        await saveBoardMessage(sent.message_id, chatId, lastBoard.text);
+  const boardText = result.boardText;
+  if (boardText) {
+    const sent = await bot.sendMessage(chatId, boardText);
+    await saveBoardMessage(sent.message_id, chatId, boardText);
 
-        setImmediate(() => {
-          learnAction(
-            'bot_sent_board',
-            lastBoard.text.slice(0, 100),
-            'Bot decided to send board based on learned timing',
-            { messageId: sent.message_id, triggeredBy: text }
-          ).catch(() => {});
-        });
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `📋 Bot ራሱ board ላከ ✅`
+    });
 
-        learningEvents.emit('activity', {
-          type: 'learn',
-          msg: `📋 Bot ራሱ board ላከ — AI decision ✅ ID: ${sent.message_id}`
-        });
-
-        await alertAdmin(bot, `📋 Bot ራሱ board ላከ!\nTriggered by: "${text}"`, 'INFO');
-      }
-    }
+    await alertAdmin(bot, `📋 Bot ራሱ board ላከ!\nTriggered by: "${text}"`, 'INFO');
+  }
+}
 
     // Register slot — bot ራሱ የላከው board ስለሆነ edit ይሰራል
     if (result.action === 'register_slot' && result.slotNumber) {
