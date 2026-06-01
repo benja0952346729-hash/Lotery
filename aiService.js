@@ -18,6 +18,73 @@ export const learningEvents = new EventEmitter();
 const BOT_NAME = process.env.BOT_NAME || 'Admin';
 
 // ─────────────────────────────────────────
+// ADMIN CONFIG
+// ─────────────────────────────────────────
+// የ admin Telegram ID ዎች ከ .env ያንብባል
+// .env ውስጥ: ADMIN_IDS=123456789,987654321
+const ADMIN_IDS = (process.env.ADMIN_IDS || '')
+  .split(',')
+  .map(id => parseInt(id.trim()))
+  .filter(id => !isNaN(id));
+
+// Bot ስም — "Bot" ብሎ ሲጠሩ ያስተውላል
+const BOT_TRIGGER = (process.env.BOT_TRIGGER || 'Bot').toLowerCase();
+
+/**
+ * ይሄ user admin ነው?
+ * @param {number} userId
+ * @returns {boolean}
+ */
+export function isAdmin(userId) {
+  return ADMIN_IDS.includes(userId);
+}
+
+/**
+ * መልዕክቱ Bot ን ጠርቷል?
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function mentionsBot(text = '') {
+  return text.toLowerCase().includes(BOT_TRIGGER);
+}
+
+/**
+ * መልዕክቱን ተንትን — ምን አይነት ነው?
+ *
+ * ውጤቶች:
+ *  - "admin_command"   → admin Bot ብሎ ጠርቶ ትዕዛዝ ሰጠ
+ *  - "admin_teaching"  → admin Bot ብሎ ጠርቶ ስህተት አስተካከለ / አስተማረ
+ *  - "admin_message"   → admin ፃፈ ግን Bot አልጠራም
+ *  - "user_about_bot"  → user Bot ብሎ ጠራ — ስለ bot እያወራ ነው
+ *  - "user_message"    → ተራ user መልዕክት
+ *
+ * @param {string} text
+ * @param {number} userId
+ * @returns {string}
+ */
+export function classifyMessage(text = '', userId) {
+  const adminSender = isAdmin(userId);
+  const botMentioned = mentionsBot(text);
+
+  if (adminSender && botMentioned) {
+    // admin Bot ጠርቶ ነው — ትዕዛዝ ወይስ ማስተማር?
+    const teachingKeywords = [
+      'ስህተት', 'አይደለም', 'ትክክል አይደለም', 'ቀይር', 'ተው',
+      'አታድርግ', 'ይህ አይሆንም', 'wrong', 'incorrect', 'no',
+      'ልክ አደለም', 'እንደዚ አይሆንም'
+    ];
+    const isTeaching = teachingKeywords.some(kw =>
+      text.toLowerCase().includes(kw.toLowerCase())
+    );
+    return isTeaching ? 'admin_teaching' : 'admin_command';
+  }
+
+  if (adminSender && !botMentioned) return 'admin_message';
+  if (!adminSender && botMentioned) return 'user_about_bot';
+  return 'user_message';
+}
+
+// ─────────────────────────────────────────
 // TOKEN TRACKER
 // ─────────────────────────────────────────
 async function trackTokens(service, inputTokens, outputTokens) {
@@ -219,6 +286,114 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
+// HANDLE ADMIN TEACHING
+// admin "Bot፣ ልክ አደለም..." ሲል ይማራል
+// ─────────────────────────────────────────
+export async function handleAdminTeaching(adminMessage, context = '') {
+  const prompt = `
+You are a learning AI for an Amharic lottery Telegram bot.
+
+The ADMIN (your owner) just corrected or taught you something.
+
+Admin message: "${adminMessage}"
+Context: "${context}"
+
+The admin is telling you what you did wrong or what you should do differently.
+Learn from this correction carefully.
+
+Return ONLY valid JSON:
+{
+  "correctionType": "wrong_response | wrong_action | style_issue | rule_update | other",
+  "whatWasWrong": "brief description in Amharic",
+  "newRule": "the rule to learn from this correction",
+  "avoidInFuture": "what to avoid next time",
+  "confidence": 0.95,
+  "shouldLearn": true
+}`;
+
+  try {
+    const response = await callDeepSeek(prompt);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (parsed.shouldLearn && parsed.newRule) {
+      await updateKnowledge({ rules: [parsed.newRule] });
+      await saveActionLog(
+        'admin_correction',
+        adminMessage.slice(0, 50),
+        parsed.whatWasWrong || '',
+        { correction: parsed.newRule, avoid: parsed.avoidInFuture },
+        true
+      );
+    }
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `👨‍🏫 Admin ማስተማሪያ ተማረ — "${parsed.whatWasWrong?.slice(0, 50)}"`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[TEACHING] Learn error:', err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────
+// HANDLE ADMIN COMMAND
+// admin "Bot፣ አድርግ..." ሲል ያደርጋል
+// ─────────────────────────────────────────
+export async function handleAdminCommand(adminMessage, currentBoardText = '') {
+  const knowledge = await readKnowledge();
+  const actionLogs = await getActionLogs(0.7);
+
+  const prompt = `
+You are an AI bot in an Amharic Telegram lottery group.
+Your ADMIN (owner) just gave you a direct command.
+You MUST obey this command exactly.
+
+Admin command: "${adminMessage}"
+
+Current board:
+"""
+${currentBoardText || '(no board yet)'}
+"""
+
+Rules you know:
+${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
+
+Parse the admin command and decide what to do.
+
+Return ONLY valid JSON:
+{
+  "action": "send_board | update_slot | delete_board | announce | respond | other",
+  "slotNumber": null,
+  "newName": null,
+  "newStatus": null,
+  "boardText": "full board text if action is send_board, else null",
+  "responseText": "Amharic response to confirm action",
+  "reason": "what admin asked for",
+  "confidence": 0.95
+}`;
+
+  try {
+    const response = await callDeepSeek(prompt);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    learningEvents.emit('activity', {
+      type: 'eval',
+      msg: `👑 Admin command: ${parsed.action} — "${parsed.reason?.slice(0, 40)}"`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[ADMIN CMD] Error:', err.message);
+    return { action: 'respond', responseText: 'ትዕዛዙን ልረዳ አልቻልኩም። እባክህ/ሽ ደግም ሞክር።', confidence: 0 };
+  }
+}
+
+// ─────────────────────────────────────────
 // TRY BOT ACTION
 // ─────────────────────────────────────────
 export async function decideBotAction(userMessage, username, currentBoardText) {
@@ -385,7 +560,7 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 // LEARN FROM MESSAGE
 // ─────────────────────────────────────────
-export async function learnFromMessage(message, isAdmin = false) {
+export async function learnFromMessage(message, isAdminMsg = false) {
   const knowledge = await readKnowledge();
 
   const prompt = `
@@ -397,13 +572,13 @@ Current knowledge:
 - Intents: ${knowledge.intents?.length || 0}
 
 New message:
-- From: ${isAdmin ? 'ADMIN' : 'USER'}
+- From: ${isAdminMsg ? 'ADMIN' : 'USER'}
 - Text: "${message.text}"
 
 Return ONLY valid JSON:
 {
   "adminStyle": {
-    "responses": ${isAdmin ? '["phrase if useful"]' : '[]'},
+    "responses": ${isAdminMsg ? '["phrase if useful"]' : '[]'},
     "greetings": [],
     "warnings": [],
     "announcements": []
@@ -428,7 +603,7 @@ Return ONLY valid JSON:
     }
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `📩 Message ተማረ — ${isAdmin ? 'ADMIN' : 'USER'}: "${message.text?.slice(0, 40)}"`
+      msg: `📩 Message ተማረ — ${isAdminMsg ? 'ADMIN' : 'USER'}: "${message.text?.slice(0, 40)}"`
     });
     return parsed;
   } catch (err) {
@@ -581,6 +756,87 @@ CRITICAL:
 }
 
 // ─────────────────────────────────────────
+// MAIN MESSAGE HANDLER
+// ሁሉም message ከዚህ ያልፋል — ማን እንደሆነ ይለያል
+// ─────────────────────────────────────────
+export async function handleIncomingMessage(message, userId, username, currentBoardText = '') {
+  const text = message.text || '';
+  const msgType = classifyMessage(text, userId);
+
+  learningEvents.emit('activity', {
+    type: 'eval',
+    msg: `📨 Message type: ${msgType} from @${username}`
+  });
+
+  switch (msgType) {
+
+    // ──────────────────────────────────────
+    // 👑 ADMIN COMMAND — "Bot፣ አድርግ..."
+    // ──────────────────────────────────────
+    case 'admin_command': {
+      const result = await handleAdminCommand(text, currentBoardText);
+      // ትዕዛዙን ተማር
+      setImmediate(() => {
+        learnAction('admin_command', text.slice(0, 50), result.reason || '', { result })
+          .catch(() => {});
+      });
+      return {
+        response: result.responseText || 'ትዕዛዙ ተቀበለ ✅',
+        action: result.action,
+        slotNumber: result.slotNumber,
+        boardText: result.boardText,
+        confidence: result.confidence || 0.95,
+        fromAdmin: true,
+        msgType,
+      };
+    }
+
+    // ──────────────────────────────────────
+    // 👨‍🏫 ADMIN TEACHING — "Bot፣ ልክ አደለም..."
+    // ──────────────────────────────────────
+    case 'admin_teaching': {
+      const result = await handleAdminTeaching(text, `Board: ${currentBoardText?.slice(0, 100)}`);
+      return {
+        response: `ገባኝ! ተማርኩ 🙏 — ${result?.whatWasWrong || ''}`,
+        action: 'learn',
+        confidence: result?.confidence || 0.95,
+        fromAdmin: true,
+        msgType,
+      };
+    }
+
+    // ──────────────────────────────────────
+    // 📝 ADMIN MESSAGE — Bot አልጠራም
+    // ─────────────────────────────────────
+    case 'admin_message': {
+      // Admin message ከ bot mention ጋር አይደለም — ተራ admin ፅሁፍ
+      // ከ context ይማራል ግን አይመልስም (admin ለ group ነው የፃፈው)
+      setImmediate(() => {
+        learnFromMessage(message, true).catch(() => {});
+        learnLotteryRules(text).catch(() => {});
+      });
+      return null; // bot አይመልስም — admin ለ group ፃፈ
+    }
+
+    // ──────────────────────────────────────
+    // 💬 USER ABOUT BOT — "Bot ጥሩ ነው..."
+    // ──────────────────────────────────────
+    case 'user_about_bot': {
+      // user ስለ bot እያወራ ነው — ተራ response ይስጥ
+      return await generateResponse(text, userId, username, currentBoardText);
+    }
+
+    // ──────────────────────────────────────
+    // 👤 USER MESSAGE — ተራ user
+    // ──────────────────────────────────────
+    case 'user_message':
+    default: {
+      return await generateResponse(text, userId, username, currentBoardText);
+    }
+  }
+}
+
+// ─────────────────────────────────────────
 // GENERATE RESPONSE
 // ─────────────────────────────────────────
 export async function generateResponse(userMessage, userId, username, currentBoardText = '') {
@@ -636,20 +892,21 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
     deepSeekBackgroundLearn(userMessage, parsed.response, `User: ${username}, Intent: ${parsed.intent}`)
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
   });
-   // decideBotAction ን ጋር አዋህድ
-try {
-  const decidedAction = await decideBotAction(userMessage, username, currentBoardText);
-  if (decidedAction && decidedAction.confidence > (parsed.confidence || 0)) {
-    parsed.action = decidedAction.action;
-    parsed.slotNumber = decidedAction.slotNumber || parsed.slotNumber;
-    if (decidedAction.responseText) {
-      parsed.response = decidedAction.responseText;
-      parsed.confidence = decidedAction.confidence;
+
+  try {
+    const decidedAction = await decideBotAction(userMessage, username, currentBoardText);
+    if (decidedAction && decidedAction.confidence > (parsed.confidence || 0)) {
+      parsed.action = decidedAction.action;
+      parsed.slotNumber = decidedAction.slotNumber || parsed.slotNumber;
+      if (decidedAction.responseText) {
+        parsed.response = decidedAction.responseText;
+        parsed.confidence = decidedAction.confidence;
+      }
     }
+  } catch (err) {
+    console.error('[DECIDE] Error:', err.message);
   }
-} catch (err) {
-  console.error('[DECIDE] Error:', err.message);
-}
+
   return {
     response: parsed.response,
     intent: parsed.intent,
@@ -796,15 +1053,15 @@ let batchTimer = null;
 const miniSummaries = [];
 const dailyExchanges = [];
 
-export function addToBuffer(msg, isAdmin, botResponse = null) {
+export function addToBuffer(msg, isAdminMsg, botResponse = null) {
   messageBuffer.push({
     text: msg.text || '',
     botResponse,
-    isAdmin,
+    isAdmin: isAdminMsg,
     timestamp: Date.now(),
   });
 
-  if (!isAdmin && botResponse) {
+  if (!isAdminMsg && botResponse) {
     dailyExchanges.push({
       user: msg.text || '',
       bot: botResponse,
@@ -1080,9 +1337,6 @@ Return ONLY valid JSON:
 
 // ─────────────────────────────────────────
 // 📷 ANALYZE PHOTO
-// Bot photo ሲያይ → Vision AI ይጠቀማል
-// ምን አይነት photo እንደሆነ ራሱ ይወስናል
-// ቀስ በቀስ ከ context ይማራል — hardcode የለም
 // ─────────────────────────────────────────
 export async function analyzePhoto(base64Image, caption = '', username = '', context = '') {
   const knowledge = await readKnowledge();
@@ -1156,12 +1410,10 @@ Return ONLY valid JSON:
     const clean = raw.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
-    // ከ photo ተምሮ rule ያስቀምጣል
     if (parsed.shouldLearn && parsed.ruleToLearn) {
       await updateKnowledge({ rules: [parsed.ruleToLearn] });
     }
 
-    // Context ለ background learning ያስቀምጣል
     if (parsed.meaning) {
       setImmediate(() => {
         deepSeekBackgroundLearn(
@@ -1180,7 +1432,6 @@ Return ONLY valid JSON:
     return parsed;
 
   } catch (err) {
-    // Vision ካልሰራ → caption ብቻ ይጠቀማል
     console.error('[PHOTO] Vision error:', err.message);
 
     if (caption) {
@@ -1210,4 +1461,4 @@ Return ONLY valid JSON:
 
     return null;
   }
-    }
+}
