@@ -19,6 +19,7 @@ import {
   addToBuffer, deepNightLearning,
   generateResponse, generateAnnouncement,
   learnFromEdit, learnFromDelete, decideBotAction,
+  learnAction, analyzePhoto,
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
 
@@ -42,11 +43,93 @@ async function alertAdmin(bot, message, level = 'INFO') {
 
 const pendingResponses = new Map();
 
+// ============================================================
+// 📦 MESSAGE CACHE — delete detection ለማድረግ
+// ============================================================
+const messageCache = new Map();
+const MAX_CACHE_SIZE = 500;
+
+function cacheMessage(messageId, text, userId, chatId) {
+  if (messageCache.size >= MAX_CACHE_SIZE) {
+    const firstKey = messageCache.keys().next().value;
+    messageCache.delete(firstKey);
+  }
+  messageCache.set(messageId, { text, userId, chatId, time: Date.now() });
+}
+
+// ============================================================
+// 📷 PHOTO CACHE — screenshot → board edit link ለማድረግ
+// ============================================================
+// User photo ሲልክ ያስቀምጣል — board ✅ ሲሆን ያገናኛል
+const recentPhotos = new Map();
+const PHOTO_LINK_WINDOW_MS = 30 * 60 * 1000; // 30 ደቂቃ
+
+function cachePhoto(userId, username, analysis, chatId) {
+  recentPhotos.set(userId, {
+    username,
+    analysis,
+    chatId,
+    time: Date.now(),
+  });
+}
+
+// Board edit ሲሆን → ቅርብ photo ካለ ያገናኛል
+async function linkPhotoToEdit(boardBeforeText, boardAfterText) {
+  const now = Date.now();
+
+  for (const [userId, photoData] of recentPhotos.entries()) {
+    // 30 ደቂቃ ያለፈ → skip
+    if (now - photoData.time > PHOTO_LINK_WINDOW_MS) {
+      recentPhotos.delete(userId);
+      continue;
+    }
+
+    // ⏳ → ✅ ሆነ = payment confirmed
+    const hadPending = boardBeforeText?.includes('⏳');
+    const nowConfirmed = boardAfterText?.includes('✅');
+
+    if (hadPending && nowConfirmed) {
+      const analysis = photoData.analysis;
+      const minutesBetween = Math.round((now - photoData.time) / 60000);
+
+      setImmediate(() => {
+        learnAction(
+          'payment_screenshot_confirmed',
+          `@${photoData.username} sent screenshot`,
+          'Admin confirmed payment after screenshot',
+          {
+            username: photoData.username,
+            userId,
+            photoType: analysis?.photoType,
+            amount: analysis?.keyDetails?.amount,
+            name: analysis?.keyDetails?.name,
+            bank: analysis?.keyDetails?.bank,
+            extractedText: analysis?.extractedText,
+            boardBefore: boardBeforeText?.slice(0, 200),
+            boardAfter: boardAfterText?.slice(0, 200),
+            minutesBetween,
+            rule: `@${photoData.username} payment screenshot (${analysis?.keyDetails?.amount} ብር) → admin ✅ በ ${minutesBetween} ደቂቃ`,
+          }
+        ).catch(() => {});
+      });
+
+      learningEvents.emit('activity', {
+        type: 'learn',
+        msg: `💰 Screenshot→✅ linked! @${photoData.username} (${minutesBetween} min later)`
+      });
+
+      recentPhotos.delete(userId);
+    }
+  }
+}
+
+// ============================================================
+// 👑 ADMIN COMMANDS
+// ============================================================
 async function handleAdminCommand(bot, msg) {
   const text = msg.text || '';
   const chatId = msg.chat.id;
 
-  // ── RATING ON/OFF ──
   if (text === '/ratingon') {
     ratingEnabled = true;
     await bot.sendMessage(chatId, '🔔 Rating ተከፈተ');
@@ -58,7 +141,6 @@ async function handleAdminCommand(bot, msg) {
     return;
   }
 
-  // ── BOT ON/OFF ──
   if (text === '/on') {
     await setBotState(true, ADMIN_ID);
     await bot.sendMessage(chatId, '✅ Bot is now ON');
@@ -81,7 +163,6 @@ async function handleAdminCommand(bot, msg) {
     return;
   }
 
-  // ── STATUS ──
   if (text === '/status') {
     const isOn = await getBotState();
     const keyStats = getKeyStats();
@@ -108,7 +189,6 @@ async function handleAdminCommand(bot, msg) {
     return;
   }
 
-  // ── LIST ──
   if (text === '/list') {
     const lotteryList = await getLotteryList();
     if (lotteryList.length === 0) {
@@ -124,7 +204,6 @@ async function handleAdminCommand(bot, msg) {
     return;
   }
 
-  // ── SUMMARY ──
   if (text === '/summary') {
     await bot.sendMessage(chatId, '⏳ DeepSeek summary እየሰራ ነው...');
     const summary = await generateLearningSummary();
@@ -149,17 +228,15 @@ ${summary.weakAreas?.map(a => `• ${a}`).join('\n') || 'None'}
     return;
   }
 
-  // ── ANNOUNCE ──
   if (text.startsWith('/announce ')) {
     const topic = text.replace('/announce ', '');
-    await bot.sendMessage(chatId, '⏳ Groq announcement እየሰራ ነው...');
+    await bot.sendMessage(chatId, '⏳ Announcement እየሰራ ነው...');
     const announcement = await generateAnnouncement(topic, '');
     await bot.sendMessage(process.env.GROUP_CHAT_ID, announcement);
     await bot.sendMessage(chatId, '✅ Announcement ተላከ:\n\n' + announcement);
     return;
   }
 
-  // ── KNOWLEDGE ──
   if (text === '/knowledge') {
     const knowledge = await readKnowledge();
     await bot.sendMessage(chatId, `
@@ -177,7 +254,6 @@ ${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No
     return;
   }
 
-  // ── TOKENS ──
   if (text === '/tokens') {
     const t = await getTokenStats();
     const ds = t['nvidia-deepseek'] || { calls: 0, input: 0, output: 0, total: 0 };
@@ -198,14 +274,12 @@ ${knowledge.rules?.slice(0, 5).map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No
     return;
   }
 
-  // ── HISTORY ──
   if (text === '/history') {
     const history = await getHistory(5);
     await bot.sendMessage(chatId, `📜 Last 5 days: ${history.length} messages in DB`);
     return;
   }
 
-  // ── CLEANUP MANUAL ──
   if (text === '/cleanup') {
     const cleaned = await cleanupOldData();
     await bot.sendMessage(chatId, `
@@ -221,7 +295,6 @@ QA pairs: ${cleaned.qaPairs} deleted
     return;
   }
 
-  // ── HELP ──
   await bot.sendMessage(chatId, `
 🤖 *ADMIN COMMANDS*
 ━━━━━━━━━━━━━━
@@ -256,54 +329,281 @@ async function handleGroupMessage(bot, msg) {
   msg._isAdmin = isAdminMessage;
   await saveHistory(msg);
 
-  // ── ADMIN PHOTO ──
+  // ── Message cache ──
+  if (text && msg.message_id) {
+    cacheMessage(msg.message_id, text, userId, chatId);
+  }
+
+  // ── PHOTO — admin ወይም user ──
   if (msg.photo) {
-    if (isAdminMessage) {
-      const caption = msg.caption || '';
-      if (caption) {
-        learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
-        learnLotteryRules(caption).catch(() => {});
+    const caption = msg.caption || '';
+    const username = msg.from?.username || msg.from?.first_name || 'User';
+
+    // ── Photo download → base64 ──
+    const analyzeWithVision = async () => {
+      try {
+        const photoSizes = msg.photo;
+        const bestPhoto = photoSizes[photoSizes.length - 1]; // largest size
+        const fileInfo = await bot.getFile(bestPhoto.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+
+        const response = await fetch(fileUrl);
+        const buffer = await response.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString('base64');
+
+        // Vision AI ይተነትናል — hardcode የለም
+        const boardMsg = await getBoardMessage();
+        const context = `
+Group context: Amharic lottery group.
+Recent board: "${boardMsg?.text?.slice(0, 200) || 'none'}"
+Sent by: ${isAdminMessage ? 'ADMIN' : 'USER @' + username}
+Caption: "${caption || 'none'}"
+        `.trim();
+
+        const analysis = await analyzePhoto(base64, caption, username, context);
+
+        if (!analysis) return;
+
+        // ── Photo type ከ action ጋር ያስተሳስራል ──
+        // Bot ያ photo ምን action ተከትሎ እንደመጣ ይቀምጣል
+        setImmediate(async () => {
+          try {
+            // Photo + ቀጣይ action connection ይቀምጣል
+            await learnAction(
+              'photo_received',
+              caption || analysis.photoType || 'no_caption',
+              `Photo analyzed: ${analysis.photoType}`,
+              {
+                photoType: analysis.photoType,
+                meaning: analysis.meaning,
+                extractedText: analysis.extractedText,
+                keyDetails: analysis.keyDetails,
+                suggestedAction: analysis.suggestedAction,
+                sentBy: isAdminMessage ? 'admin' : 'user',
+                confidence: analysis.confidence,
+                // ቀጣይ ምን ሊሆን እንደሚችል context ይሰጣል
+                expectedNext: isAdminMessage
+                  ? 'likely_board_repost_or_payment_confirm'
+                  : 'likely_payment_screenshot',
+              }
+            );
+          } catch (e) {}
+        });
+
+        // ── Admin photo ──
+        if (isAdminMessage) {
+          if (caption) {
+            learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
+            learnLotteryRules(caption).catch(() => {});
+          }
+
+          learningEvents.emit('activity', {
+            type: 'learn',
+            msg: `📷 Admin photo analyzed — "${analysis.photoType?.slice(0, 50)}" (${Math.round((analysis.confidence || 0) * 100)}%)`
+          });
+        }
+
+        // ── User photo — ብር ማስገቢያ ሊሆን ይችላል ──
+        if (!isAdminMessage) {
+          const isOn = await getBotState();
+          if (!isOn) return;
+
+          // 📷 Photo cache ያስቀምጣል — board ✅ ሲሆን ያገናኛል
+          cachePhoto(userId, username, analysis, chatId);
+
+          // AI ምን እርምጃ ወስዷል?
+          if (analysis.suggestedAction && analysis.suggestedAction !== 'respond_only') {
+            await alertAdmin(
+              bot,
+              `📷 User @${username} photo:\n` +
+              `Type: ${analysis.photoType}\n` +
+              `Meaning: ${analysis.meaning}\n` +
+              `Action: ${analysis.suggestedAction}\n` +
+              `Amount: ${analysis.keyDetails?.amount || 'N/A'}\n` +
+              `Name: ${analysis.keyDetails?.name || 'N/A'}`,
+              'INFO'
+            );
+          }
+
+          // Bot response ይልካል — AI ወስኗል
+          if (analysis.meaning && analysis.confidence >= 0.5) {
+            const boardMsg2 = await getBoardMessage();
+            const result = await generateResponse(
+              `[PHOTO] ${caption || analysis.photoType} — ${analysis.meaning}`,
+              userId,
+              username,
+              boardMsg2?.text || ''
+            );
+
+            if (result.confidence >= CONFIDENCE_THRESHOLD) {
+              await bot.sendMessage(chatId, result.response, {
+                reply_to_message_id: msg.message_id,
+              });
+              addToBuffer(msg, false, result.response);
+            }
+          }
+        }
+
+      } catch (err) {
+        console.error('[PHOTO] Error:', err.message);
+        // Vision error ቢሆን caption ብቻ ይቀምጣል
+        if (caption && isAdminMessage) {
+          learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
+        }
       }
-      learningEvents.emit('activity', {
-        type: 'learn',
-        msg: `📷 Admin photo${caption ? ' + caption learned' : ''}`
-      });
-    }
+    };
+
+    // Background ሆኖ ያስኬዳል — bot ኣይዘገይም
+    setImmediate(() => analyzeWithVision().catch(() => {}));
     return;
   }
 
   // ── ADMIN MESSAGE ──
   if (isAdminMessage) {
-    // Admin reply to user → Q&A pair ይማራል
+
+    // ── Admin reply → Q&A + correction learning ──
     if (msg.reply_to_message) {
       const repliedMsg = msg.reply_to_message;
       const userText = repliedMsg.text || '';
       const repliedUserId = repliedMsg.from?.id;
+      const isBotMessage = repliedMsg.from?.is_bot === true;
 
-      if (repliedUserId !== ADMIN_ID && userText) {
+      // ── Admin bot response ን reply አደረገ = COMMENT/SUGGESTION ──
+      if (isBotMessage && userText) {
+        // ሙሉ context buffer ውስጥ ይቀምጣል — batch ሲሰራ DeepSeek ይረዳዋል
+        addToBuffer(
+          {
+            text: `[ADMIN_FEEDBACK]
+Bot said: "${userText}"
+Admin comment: "${text}"
+Note: This is admin suggestion/feedback — not a hard rule. Learn from context.`
+          },
+          true,
+          null
+        );
+
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `💡 Admin feedback in buffer — "${text.slice(0, 40)}"`
+        });
+      }
+
+      // ── Admin user ን reply አደረገ = Q&A ──
+      if (!isBotMessage && repliedUserId !== ADMIN_ID && userText) {
+        setImmediate(() => {
+          learnQAPair(userText, text, `Group reply by admin`)
+            .catch(() => {});
+        });
+
         addToBuffer(
           { text: `[BOT_CORRECTION] User ጠየቀ: "${userText}" — ትክክለኛ መልስ: "${text}"` },
           true,
           null
         );
+
         learningEvents.emit('activity', {
           type: 'learn',
-          msg: `💬 Correction — "${userText.slice(0, 30)}" → "${text.slice(0, 30)}"`
+          msg: `💬 Q&A learned — "${userText.slice(0, 30)}" → "${text.slice(0, 30)}"`
+        });
+      }
+
+      // ── ምዝገባ confirm pattern ──
+      // Admin user ን reply አድርጎ ✅ ሲልክ = payment confirmed
+      if (text.includes('✅') || text.includes('confirmed') || text.includes('ተመዘገበ')) {
+        const numberMatch = userText.match(/\d+/);
+        if (numberMatch) {
+          setImmediate(() => {
+            learnAction(
+              'confirm_registration',
+              userText,
+              'Admin confirmed registration via reply',
+              {
+                userRequest: userText,
+                adminReply: text,
+                registeredNumber: numberMatch[0],
+                repliedUsername: repliedMsg.from?.username || repliedMsg.from?.first_name,
+              }
+            ).catch(() => {});
+          });
+
+          learningEvents.emit('activity', {
+            type: 'learn',
+            msg: `✅ Registration confirm pattern learned — #${numberMatch[0]}`
+          });
+        }
+      }
+
+      // ── ምዝገባ reject pattern ──
+      if (text.includes('❌') || text.includes('ተሰርዟል') || text.includes('አልተቀበለም')) {
+        setImmediate(() => {
+          learnAction(
+            'reject_registration',
+            userText,
+            'Admin rejected registration',
+            { userRequest: userText, adminReply: text }
+          ).catch(() => {});
         });
       }
     }
 
-    // Admin board ሲልክ → message_id ያስቀምጣል
-    // Board detect: ቁጥሮች ብዙ ወይም # ብዙ ካለ
+    // ── Board detect — # 5+ ──
     const hashCount = (text.match(/#/g) || []).length;
     if (hashCount >= 5) {
-      // ይህ message board ነው — id ያስቀምጣል
-      // message_id ወዲያው ስለሌለ sent message ን እንጠብቃለን
-      // bot.on('message') ውስጥ ስለሆነ msg.message_id አለ
+      const existingBoard = await getBoardMessage();
+
+      // አሮጌ board ነበር + አዲስ board መጣ = delete+repost pattern
+      if (existingBoard?.message_id && existingBoard.message_id !== msg.message_id) {
+        const deletedText = existingBoard.text || '';
+
+        // Delete + repost ተምሯ
+        await saveDeletedMessage(existingBoard.message_id, chatId, deletedText).catch(() => {});
+
+        setImmediate(() => {
+          learnFromDelete(deletedText, 'admin_reposted_board').catch(() => {});
+          learnAction(
+            'delete_and_repost_board',
+            deletedText.slice(0, 100),
+            'Admin deleted old board and reposted at bottom',
+            {
+              oldMessageId: existingBoard.message_id,
+              newMessageId: msg.message_id,
+              boardLength: deletedText.length,
+              reason: 'board moved to bottom of chat',
+            }
+          ).catch(() => {});
+        });
+
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `♻️ Board repost pattern learned — old: ${existingBoard.message_id} → new: ${msg.message_id}`
+        });
+
+        await alertAdmin(
+          bot,
+          `♻️ Board repost detected!\nOld ID: ${existingBoard.message_id}\nNew ID: ${msg.message_id}\nBot ተምሯ ✅`,
+          'INFO'
+        );
+      }
+
+      // አዲስ board ያስቀምጣል
       await saveBoardMessage(msg.message_id, chatId, text).catch(() => {});
+
       learningEvents.emit('activity', {
         type: 'learn',
-        msg: `📋 Board message saved — ID: ${msg.message_id}`
+        msg: `📋 Board saved — ID: ${msg.message_id} (${(text.match(/#/g) || []).length} slots)`
+      });
+    }
+
+    // ── ⏳ → ✅ payment confirmation detect ──
+    // Admin payment confirm text ሲልክ
+    if ((text.includes('⏳') || text.includes('✅')) && text.includes('#')) {
+      setImmediate(() => {
+        learnAction(
+          'payment_status_update',
+          text.slice(0, 100),
+          'Admin updated payment status on board',
+          { statusText: text }
+        ).catch(() => {});
       });
     }
 
@@ -317,21 +617,20 @@ async function handleGroupMessage(bot, msg) {
   const isOn = await getBotState();
   if (!isOn) return;
 
-  // ── AI INTENT PARSE + RESPOND ──
-  // ምንም hardcode የለም — Groq + knowledge ይወስናል
+  // ── AI RESPONSE ──
   try {
     const boardMsg = await getBoardMessage();
     const currentBoardText = boardMsg?.text || '';
 
     const result = await generateResponse(text, userId, username, currentBoardText);
 
-    // ── ACTION EXECUTOR — AI ወስኗል ምን ማድረግ እንዳለበት ──
+    // ── ACTION EXECUTOR ──
+
+    // Register slot
     if (result.action === 'register_slot' && result.slotNumber) {
-      // Bot ከ knowledge ተምሮ registration ያደርጋል
       const boardMsg = await getBoardMessage();
       if (boardMsg?.message_id) {
         const beforeText = boardMsg.text || '';
-        // Board ላይ slot ይጨምራል — አንተ እንዳደረግኸው
         const lines = beforeText.split('\n');
         const newLines = lines.map(line => {
           const match = line.match(new RegExp(`^${result.slotNumber}#\\s*$`));
@@ -347,9 +646,25 @@ async function handleGroupMessage(bot, msg) {
           });
           await saveBoardEdit(boardMsg.message_id, chatId, beforeText, newBoardText);
           await updateBoardMessageText(boardMsg.message_id, newBoardText);
+
+          // ምዝገባ pattern ይማራል
+          setImmediate(() => {
+            learnAction(
+              'auto_register_slot',
+              text,
+              `Bot auto-registered @${username} to slot ${result.slotNumber}`,
+              {
+                username,
+                slotNumber: result.slotNumber,
+                userMessage: text,
+                boardBefore: beforeText.slice(0, 200),
+              }
+            ).catch(() => {});
+          });
+
           learningEvents.emit('activity', {
             type: 'learn',
-            msg: `✅ Bot board edit አደረገ — slot ${result.slotNumber} → ${username}`
+            msg: `✅ Bot registered @${username} → slot ${result.slotNumber}`
           });
         } catch (editErr) {
           console.error('[BOARD EDIT] Error:', editErr.message);
@@ -358,6 +673,7 @@ async function handleGroupMessage(bot, msg) {
       await alertAdmin(bot, `✅ Bot registered @${username} → slot ${result.slotNumber} ⏳`, 'SUCCESS');
     }
 
+    // Send response
     if (result.confidence >= CONFIDENCE_THRESHOLD) {
       const sentMsg = await bot.sendMessage(chatId, result.response, {
         reply_to_message_id: msg.message_id,
@@ -417,8 +733,6 @@ async function handleGroupMessage(bot, msg) {
     await alertAdmin(bot, `🚨 Error: ${err.message}`, 'ERROR');
   }
 }
-
-
 
 // ============================================================
 // ⭐ RATING SYSTEM
@@ -671,23 +985,23 @@ bot.on('message', async (msg) => {
   }
 });
 
-// ── EDITED MESSAGES — admin manually edit ሲያደርግ ──
+// ── EDITED MESSAGES ──
 bot.on('edited_message', async (msg) => {
   try {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
 
-    // Group ውስጥ ብቻ
     if (String(chatId) !== String(GROUP_ID) && msg.chat.type !== 'supergroup') return;
 
     const afterText = msg.text || '';
     const messageId = msg.message_id;
 
-    // DB ውስጥ ካለ before text ያወጣል
+    // Before text — cache ወይም DB ከ
+    const cached = messageCache.get(messageId);
     const boardMsg = await getBoardMessage();
     const beforeText = boardMsg?.message_id === messageId
       ? boardMsg.text
-      : null;
+      : cached?.text || null;
 
     // Edit ያስቀምጣል
     await saveBoardEdit(messageId, chatId, beforeText, afterText);
@@ -697,7 +1011,56 @@ bot.on('edited_message', async (msg) => {
       await updateBoardMessageText(messageId, afterText);
     }
 
-    // DeepSeek background ሆኖ ይማራል
+    // Cache ያዘምናል
+    cacheMessage(messageId, afterText, userId, chatId);
+
+    // ── ምዝገባ edit pattern ──
+    // ⏳ → ✅ = payment confirmed
+    if (beforeText && afterText) {
+      const hadPending = beforeText.includes('⏳');
+      const nowConfirmed = afterText.includes('✅');
+      const hadConfirmed = beforeText.includes('✅');
+      const nowRemoved = !afterText.includes('✅') && hadConfirmed;
+
+      if (hadPending && nowConfirmed) {
+        setImmediate(() => {
+          learnAction(
+            'payment_confirmed_via_edit',
+            beforeText.slice(0, 100),
+            'Admin changed ⏳ to ✅ — payment confirmed',
+            { beforeText: beforeText.slice(0, 200), afterText: afterText.slice(0, 200) }
+          ).catch(() => {});
+        });
+
+        // 📷 ቅርብ screenshot ካለ → ያገናኛል
+        setImmediate(() => {
+          linkPhotoToEdit(beforeText, afterText).catch(() => {});
+        });
+
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `💰 Payment confirm pattern learned — ⏳ → ✅`
+        });
+      }
+
+      if (nowRemoved) {
+        setImmediate(() => {
+          learnAction(
+            'member_removed_via_edit',
+            beforeText.slice(0, 100),
+            'Admin removed member from board',
+            { beforeText: beforeText.slice(0, 200), afterText: afterText.slice(0, 200) }
+          ).catch(() => {});
+        });
+
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `❌ Member removal pattern learned`
+        });
+      }
+    }
+
+    // DeepSeek background ይማራል
     setImmediate(() => {
       learnFromEdit(messageId, beforeText, afterText)
         .catch(err => console.error('[EDIT] Learn error:', err.message));
@@ -705,14 +1068,13 @@ bot.on('edited_message', async (msg) => {
 
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `✏️ Edit detected — message ${messageId}`
+      msg: `✏️ Edit detected & learned — message ${messageId}`
     });
 
-    // Admin alert
     if (isAdmin(userId)) {
       await alertAdmin(
         bot,
-        `✏️ Board edit detected — learning...\nMsg ID: ${messageId}`,
+        `✏️ Board edit learned!\nMsg ID: ${messageId}`,
         'INFO'
       );
     }
@@ -720,14 +1082,6 @@ bot.on('edited_message', async (msg) => {
   } catch (err) {
     console.error('[EDIT] Handler error:', err.message);
   }
-});
-
-// ── DELETED MESSAGES — Telegram channel_post delete ──
-// Note: Telegram bot API ን delete event ቀጥታ አይሰጥም
-// Admin delete ሲያደርግ → message_id ብቻ ይሰጣል
-// ስለዚህ ሁሉም messages DB ውስጥ ይቀምጣሉ — delete detect ለማድረግ
-bot.on('message', async (msg) => {
-  // Already handled above — this is just for logging
 });
 
 // ============================================================
@@ -742,7 +1096,6 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // ── RATING TOGGLE ──
   if (data === 'toggle_rating:off') {
     ratingEnabled = false;
     await bot.answerCallbackQuery(query.id, { text: '🔕 Rating ጠፋ' });
@@ -763,7 +1116,6 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // ── RATING SUBMIT ──
   if (data.startsWith('rate_')) {
     const lastColon = data.lastIndexOf(':');
     const rId = data.substring(0, lastColon);
@@ -807,7 +1159,6 @@ cron.schedule('0 23 * * *', async () => {
   try {
     await alertAdmin(bot, '🌙 24hr Deep Learning እየጀመረ...', 'INFO');
 
-    // 1. Deep Learning
     const result = await deepNightLearning();
     if (result) {
       await bot.sendMessage(
@@ -821,7 +1172,6 @@ cron.schedule('0 23 * * *', async () => {
       );
     }
 
-    // 2. Cleanup — 5 ቀን ያለፈ raw data ያጠፋ
     const cleaned = await cleanupOldData();
     await alertAdmin(
       bot,
