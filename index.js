@@ -20,6 +20,7 @@ import {
   generateResponse, generateAnnouncement,
   learnFromEdit, learnFromDelete, decideBotAction,
   learnAction,
+  handleIncomingMessage,
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
 
@@ -276,7 +277,6 @@ async function handleGroupMessage(bot, msg) {
         learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
         learnLotteryRules(caption).catch(() => {});
       }
-      // Vision call አታድርግ — model አይደግፍም
       learningEvents.emit('activity', {
         type: 'learn',
         msg: `📷 Admin photo${caption ? ` + caption learned: "${caption.slice(0, 30)}"` : ''}`
@@ -348,15 +348,12 @@ async function handleGroupMessage(bot, msg) {
     }
 
     // ── Board detect — # 5+ ──
-    // Admin board ሲልክ → bot ይማራል ብቻ (timing, context, structure)
-    // Bot AI ተምሮ ሲወስን ራሱ ይልካል — copy አያደርግም
     const hashCount = (text.match(/#/g) || []).length;
     if (hashCount >= 5) {
-    const existingBoard = await getBoardMessage();
-    await updateKnowledge({ boardTemplate: text });
-  await saveBoardMessage(msg.message_id, chatId, text);
-      
-      // አሮጌ board ካለ pattern ይማራል
+      const existingBoard = await getBoardMessage();
+      await updateKnowledge({ boardTemplate: text });
+      await saveBoardMessage(msg.message_id, chatId, text);
+
       if (existingBoard?.message_id && existingBoard.message_id !== msg.message_id) {
         setImmediate(() => {
           learnFromDelete(existingBoard.text, 'admin_replaced_board').catch(() => {});
@@ -373,8 +370,6 @@ async function handleGroupMessage(bot, msg) {
         });
       }
 
-      // Admin board timing + structure ይማራል
-      // Bot ተምሮ ሲወስን → send_board action ይወስናል → ራሱ ይልካል → ራሱ ያስተካከላል
       setImmediate(() => {
         const now = new Date();
         learnAction(
@@ -416,6 +411,22 @@ async function handleGroupMessage(bot, msg) {
       });
     }
 
+    // ── Bot mention ካለ → AI teaching/command ──
+    const botMentioned = text.toLowerCase().includes(
+      (process.env.BOT_TRIGGER || 'bot').toLowerCase()
+    );
+
+    if (botMentioned) {
+      const boardMsg = await getBoardMessage();
+      const result = await handleIncomingMessage(
+        msg, userId, username, boardMsg?.text || ''
+      );
+      if (result?.response) {
+        await bot.sendMessage(chatId, result.response);
+      }
+      return;
+    }
+
     addToBuffer(msg, true);
     learnLotteryRules(text).catch(() => {});
     learnFromMessage(msg, true).catch(() => {});
@@ -431,25 +442,29 @@ async function handleGroupMessage(bot, msg) {
     const boardMsg = await getBoardMessage();
     const currentBoardText = boardMsg?.text || '';
 
-    const result = await generateResponse(text, userId, username, currentBoardText);
+    const result = await handleIncomingMessage(
+      msg, userId, username, currentBoardText
+    );
+
+    if (!result) return;
 
     // ── ACTION EXECUTOR ──
 
     // Send board — AI ተምሮ ሲወስን ራሱ ይልካል
     if (result.action === 'send_board') {
-  const boardText = result.boardText;
-  if (boardText) {
-    const sent = await bot.sendMessage(chatId, boardText);
-    await saveBoardMessage(sent.message_id, chatId, boardText);
+      const boardText = result.boardText;
+      if (boardText) {
+        const sent = await bot.sendMessage(chatId, boardText);
+        await saveBoardMessage(sent.message_id, chatId, boardText);
 
-    learningEvents.emit('activity', {
-      type: 'learn',
-      msg: `📋 Bot ራሱ board ላከ ✅`
-    });
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `📋 Bot ራሱ board ላከ ✅`
+        });
 
-    await alertAdmin(bot, `📋 Bot ራሱ board ላከ!\nTriggered by: "${text}"`, 'INFO');
-  }
-}
+        await alertAdmin(bot, `📋 Bot ራሱ board ላከ!\nTriggered by: "${text}"`, 'INFO');
+      }
+    }
 
     // Register slot — bot ራሱ የላከው board ስለሆነ edit ይሰራል
     if (result.action === 'register_slot' && result.slotNumber) {
@@ -492,8 +507,6 @@ async function handleGroupMessage(bot, msg) {
           });
         } catch (editErr) {
           if (editErr.message?.includes("message can't be edited")) {
-            // Board bot ያልላከው ነው — admin ምሳሌ ሊሆን ይችላል
-            // ቀጣዩ board bot ራሱ ስለሚልክ ይስተካከላል
             learningEvents.emit('activity', {
               type: 'eval',
               msg: `⚠️ Board edit skipped — not bot's message (learning board)`
