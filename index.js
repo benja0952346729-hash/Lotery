@@ -4,7 +4,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import cron from 'node-cron';
 import {
   readKnowledge, updateKnowledge, saveHistory, getHistory,
-  registerMember, getLotteryList, getBotState, setBotState,
+  getLotteryList, getBotState, setBotState,
   initDB, query,
   removeMember, clearLottery,
   saveBoardMessage, getBoardMessage, updateBoardMessageText,
@@ -17,7 +17,7 @@ import {
   learningEvents, getTokenStats, testNvidiaConnection,
   learnQAPair, learnFromRating,
   addToBuffer, deepNightLearning,
-  generateResponse, handleRegistration, generateAnnouncement,
+  generateResponse, generateAnnouncement,
   learnFromEdit, learnFromDelete, decideBotAction,
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
@@ -317,30 +317,46 @@ async function handleGroupMessage(bot, msg) {
   const isOn = await getBotState();
   if (!isOn) return;
 
-  // ── REGISTRATION CHECK ──
-  const registrationMatch = text.match(/(\d+)/);
-  const isRegistrationRequest =
-    text.includes('ምዝገባ') ||
-    text.includes('register') ||
-    text.includes('መዝገብ') ||
-    text.includes('እፈልጋለሁ') ||
-    (registrationMatch && text.length < 50);
-
-  if (isRegistrationRequest && registrationMatch) {
-    const requestedNumber = parseInt(registrationMatch[1]);
-    if (requestedNumber >= 1 && requestedNumber <= 100) {
-      await handleLotteryRegistration(bot, msg, userId, username, requestedNumber, chatId);
-      return;
-    }
-  }
-
-  // ── GENERATE RESPONSE ──
+  // ── AI INTENT PARSE + RESPOND ──
+  // ምንም hardcode የለም — Groq + knowledge ይወስናል
   try {
-    // Current board text ያወጣል
     const boardMsg = await getBoardMessage();
     const currentBoardText = boardMsg?.text || '';
 
     const result = await generateResponse(text, userId, username, currentBoardText);
+
+    // ── ACTION EXECUTOR — AI ወስኗል ምን ማድረግ እንዳለበት ──
+    if (result.action === 'register_slot' && result.slotNumber) {
+      // Bot ከ knowledge ተምሮ registration ያደርጋል
+      const boardMsg = await getBoardMessage();
+      if (boardMsg?.message_id) {
+        const beforeText = boardMsg.text || '';
+        // Board ላይ slot ይጨምራል — አንተ እንዳደረግኸው
+        const lines = beforeText.split('\n');
+        const newLines = lines.map(line => {
+          const match = line.match(new RegExp(`^${result.slotNumber}#\\s*$`));
+          if (match) return `${result.slotNumber}# ${username} ⏳`;
+          return line;
+        });
+        const newBoardText = newLines.join('\n');
+
+        try {
+          await bot.editMessageText(newBoardText, {
+            chat_id: chatId,
+            message_id: boardMsg.message_id,
+          });
+          await saveBoardEdit(boardMsg.message_id, chatId, beforeText, newBoardText);
+          await updateBoardMessageText(boardMsg.message_id, newBoardText);
+          learningEvents.emit('activity', {
+            type: 'learn',
+            msg: `✅ Bot board edit አደረገ — slot ${result.slotNumber} → ${username}`
+          });
+        } catch (editErr) {
+          console.error('[BOARD EDIT] Error:', editErr.message);
+        }
+      }
+      await alertAdmin(bot, `✅ Bot registered @${username} → slot ${result.slotNumber} ⏳`, 'SUCCESS');
+    }
 
     if (result.confidence >= CONFIDENCE_THRESHOLD) {
       const sentMsg = await bot.sendMessage(chatId, result.response, {
@@ -402,31 +418,7 @@ async function handleGroupMessage(bot, msg) {
   }
 }
 
-async function handleLotteryRegistration(bot, msg, userId, username, requestedNumber, chatId) {
-  try {
-    const result = await handleRegistration(userId, username, requestedNumber);
 
-    if (result.available) {
-      const regResult = await registerMember(userId, username, requestedNumber);
-      if (regResult.success) {
-        await bot.sendMessage(chatId, result.response, {
-          reply_to_message_id: msg.message_id
-        });
-        await alertAdmin(
-          bot,
-          `✅ @${username} → ቁጥር ${requestedNumber} ⏳`,
-          'INFO'
-        );
-      }
-    } else {
-      await bot.sendMessage(chatId, result.response, {
-        reply_to_message_id: msg.message_id
-      });
-    }
-  } catch (err) {
-    console.error('[REGISTRATION] Error:', err.message);
-  }
-}
 
 // ============================================================
 // ⭐ RATING SYSTEM
