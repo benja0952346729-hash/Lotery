@@ -6,6 +6,8 @@ import {
   getLotteryList, getTokenUsage, addTokenUsage,
   saveActionLog, updateActionConfidence, getActionLogs,
   saveQAPair, updateQAConfidence, findSimilarQA, getBestQAPairs,
+  saveBoardEdit, getUnlearnedEdits, markEditLearned,
+  getBoardEdits, getDeletedMessages,
 } from './database.js';
 
 // ─────────────────────────────────────────
@@ -139,6 +141,123 @@ export async function testNvidiaConnection() {
 }
 
 // ─────────────────────────────────────────
+// LEARN FROM EDIT
+// ─────────────────────────────────────────
+export async function learnFromEdit(messageId, beforeText, afterText) {
+  const prompt = `
+You are a learning AI student for an Amharic lottery Telegram bot.
+
+The admin just manually EDITED a message. Analyze what changed and why.
+
+Before edit:
+"""
+${beforeText || '(empty)'}
+"""
+
+After edit:
+"""
+${afterText || '(empty)'}
+"""
+
+Message ID: ${messageId}
+
+Analyze the difference:
+- What was added? (new name, status symbol like ✅ or ⏳, number, etc.)
+- What was removed? (name deleted = person left or didn't pay?)
+- What was changed? (⏳ → ✅ = payment confirmed?)
+
+Extract the rule the bot should learn.
+
+Return ONLY valid JSON:
+{
+  "changeType": "added_name | removed_name | status_changed | reposted | other",
+  "whatChanged": "brief description in Amharic",
+  "rule": "rule bot should follow next time",
+  "botAction": "what bot should do automatically next time",
+  "confidence": 0.9,
+  "shouldLearn": true
+}`;
+
+  try {
+    const response = await callDeepSeek(prompt);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (parsed.shouldLearn && parsed.rule) {
+      await updateKnowledge({ rules: [parsed.rule] });
+      await saveActionLog(
+        parsed.changeType || 'edit',
+        beforeText?.slice(0, 50) || '',
+        parsed.whatChanged || '',
+        { beforeText, afterText, botAction: parsed.botAction },
+        true
+      );
+    }
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `✏️ Edit ተማረ — ${parsed.changeType}: "${parsed.whatChanged?.slice(0, 50)}"`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[EDIT] Learn error:', err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────
+// LEARN FROM DELETE
+// ─────────────────────────────────────────
+export async function learnFromDelete(deletedText, context = '') {
+  const prompt = `
+You are a learning AI student for an Amharic lottery Telegram bot.
+
+The admin just DELETED a message. Analyze why.
+
+Deleted message:
+"""
+${deletedText || '(unknown)'}
+"""
+
+Context: ${context}
+
+Why did admin delete this? Common reasons:
+- Board text became too long → delete + repost at bottom
+- Wrong info was sent → corrected
+- Outdated message → cleaned up
+
+Return ONLY valid JSON:
+{
+  "reason": "why admin deleted this",
+  "rule": "rule bot should follow",
+  "botAction": "what bot should do next time",
+  "confidence": 0.8,
+  "shouldLearn": true
+}`;
+
+  try {
+    const response = await callDeepSeek(prompt);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (parsed.shouldLearn && parsed.rule) {
+      await updateKnowledge({ rules: [parsed.rule] });
+    }
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `🗑️ Delete ተማረ — "${parsed.reason?.slice(0, 50)}"`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[DELETE] Learn error:', err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────
 // HANDLE ADMIN TEACHING
 // ─────────────────────────────────────────
 export async function handleAdminTeaching(adminMessage, context = '') {
@@ -194,9 +313,10 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 // HANDLE ADMIN COMMAND
 // ─────────────────────────────────────────
-export async function handleAdminCommand(adminMessage) {
+export async function handleAdminCommand(adminMessage, currentBoardText = '') {
   const knowledge = await readKnowledge();
   const actionLogs = await getActionLogs(0.7);
+  const template = knowledge.boardTemplate || '';
 
   const prompt = `
 You are an AI student learning to manage an Amharic Telegram lottery group.
@@ -205,6 +325,16 @@ You MUST obey this command exactly.
 
 Admin command: "${adminMessage}"
 
+Current board:
+"""
+${currentBoardText || '(no board yet)'}
+"""
+
+Board template learned from admin:
+"""
+${template || '(not learned yet)'}
+"""
+
 Rules you learned from admin:
 ${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
 
@@ -212,7 +342,11 @@ Parse the admin command and decide what to do.
 
 Return ONLY valid JSON:
 {
-  "action": "announce | respond | other",
+  "action": "send_board | update_slot | delete_board | announce | respond | other",
+  "slotNumber": null,
+  "newName": null,
+  "newStatus": null,
+  "boardText": "full board text if action is send_board, else null",
   "responseText": "Amharic response to confirm action",
   "reason": "what admin asked for",
   "confidence": 0.95
@@ -232,6 +366,69 @@ Return ONLY valid JSON:
   } catch (err) {
     console.error('[ADMIN CMD] Error:', err.message);
     return { action: 'respond', responseText: 'ትዕዛዙን ልረዳ አልቻልኩም። እባክህ/ሽ ደግም ሞክር።', confidence: 0 };
+  }
+}
+
+// ─────────────────────────────────────────
+// TRY BOT ACTION
+// ─────────────────────────────────────────
+export async function decideBotAction(userMessage, username, currentBoardText) {
+  const knowledge = await readKnowledge();
+  const actionLogs = await getActionLogs(0.7);
+  const edits = await getBoardEdits(20);
+  const deletions = await getDeletedMessages(10);
+
+  const prompt = `
+You are an AI student learning to manage an Amharic Telegram lottery group.
+You learned everything from watching the admin.
+
+Board structure learned from admin:
+${knowledge.boardTemplate || edits.slice(0, 3).map(e => e.after_text || e.before_text).join('\n---\n') || 'None yet'}
+
+Rules learned from admin:
+${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
+
+High confidence actions learned:
+${actionLogs.map(a =>
+  `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
+).join('\n') || 'None yet'}
+
+Current board:
+"""
+${currentBoardText || '(no board yet)'}
+"""
+
+User message: "@${username}: ${userMessage}"
+
+Decide what to do based on what you learned from admin.
+If action is "send_board" — create FULL board text exactly like admin does.
+
+Return ONLY valid JSON:
+{
+  "action": "send_board | register_slot | respond_only | no_action",
+  "slotNumber": null,
+  "newName": null,
+  "boardText": "FULL board text if action is send_board, else null",
+  "responseText": "Amharic response to send to user",
+  "reason": "why this action",
+  "confidence": 0.85,
+  "shouldAct": true
+}`;
+
+  try {
+    const response = await callDeepSeek(prompt);
+    const clean = response.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    learningEvents.emit('activity', {
+      type: 'eval',
+      msg: `🤖 Bot action decided: ${parsed.action} (${Math.round((parsed.confidence || 0) * 100)}%)`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[ACTION] Decide error:', err.message);
+    return { action: 'respond_only', shouldAct: false, confidence: 0 };
   }
 }
 
@@ -489,11 +686,12 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 // SYSTEM PROMPT BUILDER — STUDENT MINDSET
 // ─────────────────────────────────────────
-async function buildSystemPrompt() {
+async function buildSystemPrompt(currentBoardText = '') {
   const knowledge = await readKnowledge();
   const lotteryList = await getLotteryList();
   const bestPairs = await getBestQAPairs(20);
   const actionLogs = await getActionLogs(0.6);
+  const edits = await getBoardEdits(10);
 
   const confidencePct = Math.round((knowledge.confidence || 0) * 100);
   const isReady = (knowledge.confidence || 0) >= 0.8;
@@ -521,6 +719,11 @@ ${knowledge.rules?.map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No rules yet �
 
 REGISTERED MEMBERS: ${lotteryList.length}/100
 
+WHAT ADMIN TAUGHT ME THROUGH EDITS:
+${edits.slice(0, 8).map(e =>
+  `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
+).join('\n') || 'None yet'}
+
 ACTIONS I LEARNED FROM ADMIN:
 ${actionLogs.map(a =>
   `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
@@ -534,6 +737,8 @@ ${knowledge.intents?.slice(0, 20).map(i =>
   `- "${i.pattern}" → "${i.betterResponse || i.response}"`
 ).join('\n') || ''}
 
+${currentBoardText ? `CURRENT BOARD:\n${currentBoardText}` : ''}
+
 CRITICAL RULES:
 1. Always respond in Amharic
 2. Act EXACTLY like admin — same phrases, same emojis, same tone
@@ -545,7 +750,7 @@ CRITICAL RULES:
 // ─────────────────────────────────────────
 // MAIN MESSAGE HANDLER
 // ─────────────────────────────────────────
-export async function handleIncomingMessage(message, userId, username) {
+export async function handleIncomingMessage(message, userId, username, currentBoardText = '') {
   const text = message.text || '';
   const msgType = classifyMessage(text, userId);
 
@@ -557,7 +762,7 @@ export async function handleIncomingMessage(message, userId, username) {
   switch (msgType) {
 
     case 'admin_command': {
-      const result = await handleAdminCommand(text);
+      const result = await handleAdminCommand(text, currentBoardText);
       setImmediate(() => {
         learnAction('admin_command', text.slice(0, 50), result.reason || '', { result })
           .catch(() => {});
@@ -565,6 +770,8 @@ export async function handleIncomingMessage(message, userId, username) {
       return {
         response: result.responseText || 'ትዕዛዙ ተቀበለ ✅',
         action: result.action,
+        slotNumber: result.slotNumber,
+        boardText: result.boardText,
         confidence: result.confidence || 0.95,
         fromAdmin: true,
         msgType,
@@ -572,7 +779,7 @@ export async function handleIncomingMessage(message, userId, username) {
     }
 
     case 'admin_teaching': {
-      const result = await handleAdminTeaching(text);
+      const result = await handleAdminTeaching(text, `Board: ${currentBoardText?.slice(0, 100)}`);
       return {
         response: `ገባኝ! ተማርኩ 🙏 — ${result?.whatWasWrong || ''}`,
         action: 'learn',
@@ -591,12 +798,12 @@ export async function handleIncomingMessage(message, userId, username) {
     }
 
     case 'user_about_bot': {
-      return await generateResponse(text, userId, username);
+      return await generateResponse(text, userId, username, currentBoardText);
     }
 
     case 'user_message':
     default: {
-      return await generateResponse(text, userId, username);
+      return await generateResponse(text, userId, username, currentBoardText);
     }
   }
 }
@@ -604,7 +811,7 @@ export async function handleIncomingMessage(message, userId, username) {
 // ─────────────────────────────────────────
 // GENERATE RESPONSE
 // ─────────────────────────────────────────
-export async function generateResponse(userMessage, userId, username) {
+export async function generateResponse(userMessage, userId, username, currentBoardText = '') {
   const similarPairs = await findSimilarQA(userMessage, 3);
   const exactMatch = similarPairs.find(p =>
     p.user_message === userMessage && p.confidence >= 0.9
@@ -622,15 +829,17 @@ export async function generateResponse(userMessage, userId, username) {
     };
   }
 
-  const systemPrompt = await buildSystemPrompt();
+  const systemPrompt = await buildSystemPrompt(currentBoardText);
   const intentPrompt = systemPrompt + `
 
 User message: "${username}: ${userMessage}"
+Current board: """${currentBoardText || 'none'}"""
 
 Decide the ACTION and RESPONSE. Return ONLY valid JSON:
 {
-  "intent": "greeting | payment | question | other",
-  "action": "respond_only",
+  "intent": "register | check_availability | greeting | payment | question | other",
+  "slotNumber": null,
+  "action": "register_slot | edit_board | respond_only | check_slot",
   "response": "Amharic response exactly like admin",
   "confidence": 0.9
 }`;
@@ -655,10 +864,25 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
   });
 
+  try {
+    const decidedAction = await decideBotAction(userMessage, username, currentBoardText);
+    if (decidedAction && decidedAction.confidence > (parsed.confidence || 0)) {
+      parsed.action = decidedAction.action;
+      parsed.slotNumber = decidedAction.slotNumber || parsed.slotNumber;
+      if (decidedAction.responseText) {
+        parsed.response = decidedAction.responseText;
+        parsed.confidence = decidedAction.confidence;
+      }
+    }
+  } catch (err) {
+    console.error('[DECIDE] Error:', err.message);
+  }
+
   return {
     response: parsed.response,
     intent: parsed.intent,
     action: parsed.action,
+    slotNumber: parsed.slotNumber,
     confidence: parsed.confidence || 1.0,
     fromCache: false,
   };
@@ -722,6 +946,8 @@ export async function generateLearningSummary() {
   const knowledge = await readKnowledge();
   const history = await getHistory(5);
   const bestPairs = await getBestQAPairs(10);
+  const edits = await getBoardEdits(20);
+  const deletions = await getDeletedMessages(10);
 
   const rulesCount = knowledge.rules?.length || 0;
   const intentsCount = knowledge.intents?.length || 0;
@@ -735,6 +961,7 @@ Current data:
 - Rules learned: ${rulesCount}
 - Intents learned: ${intentsCount}
 - Q&A pairs: ${bestPairs.length}
+- Board edits studied: ${edits.length}
 - Messages (5 days): ${history.length}
 
 Top rules learned:
@@ -927,6 +1154,8 @@ export async function deepNightLearning() {
   const knowledge = await readKnowledge();
   const history = await getHistory(1);
   const bestPairs = await getBestQAPairs(20);
+  const edits = await getBoardEdits(50);
+  const deletions = await getDeletedMessages(20);
 
   const summariesToProcess = [...miniSummaries];
   miniSummaries.length = 0;
@@ -939,6 +1168,14 @@ End of day — review everything you learned today and consolidate.
 
 Mini summaries today (${summariesToProcess.length} batches):
 ${summariesToProcess.map((s, i) => `Batch ${i+1}: ${s.summary} (${s.messageCount} msgs)`).join('\n')}
+
+Board edits studied today (${edits.length}):
+${edits.slice(0, 20).map(e =>
+  `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
+).join('\n') || 'None'}
+
+Deletions studied today (${deletions.length}):
+${deletions.slice(0, 10).map(d => `- "${d.text?.slice(0, 40)}"`).join('\n') || 'None'}
 
 Current knowledge:
 - Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
@@ -1251,6 +1488,7 @@ YOUR MINDSET:
 WHAT YOU KNOW SO FAR (${confidencePct}%):
 - Rules: ${knowledge.rules?.slice(0, 10).map((r, i) => `${i+1}. ${r}`).join(' | ') || 'ገና እየተማርኩ ነው'}
 - Admin style: ${knowledge.adminStyle?.responses?.slice(0, 5).join(' | ') || 'ገና እየተማርኩ ነው'}
+- Board template: ${knowledge.boardTemplate ? 'አውቃለሁ ✅' : 'ገና አላወቅሁም ❌'}
 - Intents: ${knowledge.intents?.length || 0} patterns learned
 
 ${history.summary ? `EARLIER IN THIS CONVERSATION:\n${history.summary}` : ''}
@@ -1296,8 +1534,10 @@ BEHAVIOR:
       learnFromMessage({ text: userMessage }, true).catch(() => {});
       learnLotteryRules(userMessage).catch(() => {});
 
+      // Q&A pair ሆኖ ቀምጥ — user message + bot reply ሁለቱም
       saveQAPair(userMessage, botReply, 'private_teaching', '', true).catch(() => {});
 
+      // Intent ሆኖ ቀምጥ — group ላይ ይጠቀምበታል
       updateKnowledge({
         intents: [{
           pattern: userMessage,
@@ -1326,4 +1566,4 @@ BEHAVIOR:
 
 export function clearPrivateHistory(userId) {
   privateChatHistories.delete(userId);
-}
+  }
