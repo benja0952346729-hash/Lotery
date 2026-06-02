@@ -21,6 +21,8 @@ import {
   learnFromEdit, learnFromDelete, decideBotAction,
   learnAction,
   handleIncomingMessage,
+  handlePrivateTeaching,
+  clearPrivateHistory,
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
 
@@ -272,14 +274,31 @@ async function handleGroupMessage(bot, msg) {
   // ── ADMIN PHOTO ──
   if (msg.photo) {
     if (isAdminMessage) {
-      const caption = msg.caption || '';
+      const caption = msg.caption || "";
       if (caption) {
         learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
         learnLotteryRules(caption).catch(() => {});
       }
-      learningEvents.emit('activity', {
-        type: 'learn',
-        msg: `📷 Admin photo${caption ? ` + caption learned: "${caption.slice(0, 30)}"` : ''}`
+
+      // AI ይማር — ምን አይነት photo? ምን ሰዓት? ምን ቀን? ምን ይከተላል?
+      setImmediate(() => {
+        learnAction(
+          "admin_sent_photo",
+          caption || "photo_no_caption",
+          "Admin sent a photo — AI should learn what type and what usually follows",
+          {
+            caption,
+            hour: new Date().getHours(),
+            minute: new Date().getMinutes(),
+            dayOfWeek: new Date().getDay(),
+            timestamp: Date.now(),
+          }
+        ).catch(() => {});
+      });
+
+      learningEvents.emit("activity", {
+        type: "learn",
+        msg: `📷 Admin photo learned — hour:${new Date().getHours()} day:${new Date().getDay()}${caption ? ` caption:"${caption.slice(0, 30)}"` : ""}`
       });
     }
     return;
@@ -823,7 +842,24 @@ bot.on('message', async (msg) => {
           return;
         }
 
-        await handleAdminCommand(bot, msg);
+        // ── /clear — history ሰርዝ ──
+        if (text === '/clear') {
+          clearPrivateHistory(userId);
+          await bot.sendMessage(chatId, '🗑️ Conversation history ጠፋ — አዲስ ጀምር!');
+          return;
+        }
+
+        // ── /commands ──
+        if (text.startsWith('/')) {
+          await handleAdminCommand(bot, msg);
+          return;
+        }
+
+        // ── Interactive teaching mode ──
+        await bot.sendChatAction(chatId, 'typing');
+        const reply = await handlePrivateTeaching(userId, text);
+        await bot.sendMessage(chatId, reply);
+
       } else {
         await bot.sendMessage(chatId, 'ይህ bot ለ admin ብቻ ነው።');
       }
