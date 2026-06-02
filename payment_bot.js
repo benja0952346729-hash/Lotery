@@ -124,11 +124,9 @@ export async function handleLotteryPhoto(bot, msg) {
     console.log(`[Lottery] Analysis:`, result);
 
     if (result.type !== 'lottery') {
-      await bot.sendMessage(
-        chatId,
-        `❌ የሎተሪ ቲኬት አይደለም።`,
-        { reply_to_message_id: msg.message_id }
-      );
+      // ሎተሪ ካልሆነ — payment screenshot ሊሆን ይችላል
+      console.log(`[Lottery] Not a lottery ticket — passing to payment handler`);
+      await handlePaymentPhoto(bot, msg);
       return;
     }
 
