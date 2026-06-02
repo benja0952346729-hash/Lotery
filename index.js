@@ -25,7 +25,7 @@ import {
   clearPrivateHistory,
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
-
+import { handlePaymentPhoto, handleSmsWebhook } from './payment_bot.js';
 import {
   learnBoardAction,
   handlePrivateBoardTeaching,
@@ -284,14 +284,13 @@ async function handleGroupMessage(bot, msg) {
 
   // ── ADMIN PHOTO ──
   if (msg.photo) {
-    if (isAdminMessage) {
+    if (isAdmin(userId)) {
       const caption = msg.caption || "";
       if (caption) {
         learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
         learnLotteryRules(caption).catch(() => {});
       }
 
-      // AI ይማር — ምን አይነት photo? ምን ሰዓት? ምን ቀን? ምን ይከተላል?
       setImmediate(() => {
         learnAction(
           "admin_sent_photo",
@@ -311,7 +310,10 @@ async function handleGroupMessage(bot, msg) {
         type: "learn",
         msg: `📷 Admin photo learned — hour:${new Date().getHours()} day:${new Date().getDay()}${caption ? ` caption:"${caption.slice(0, 30)}"` : ""}`
       });
+      return; // ← return ወደ ውስጥ ገባ
     }
+    // User photo = payment screenshot ✅
+    await handlePaymentPhoto(bot, msg);
     return;
   }
 
@@ -483,11 +485,13 @@ async function handleGroupMessage(bot, msg) {
   if (!isOn) return;
 
   // ── AI RESPONSE ──
-  try {
-    const boardMsg = await getBoardMessage();
-    const currentBoardText = boardMsg?.text || '';
+try {
+  const boardMsg = await getBoardMessage();
+  const currentBoardText = boardMsg?.text || '';
 
-    const result = await handleIncomingMessage(
+  await bot.sendChatAction(chatId, 'typing');
+
+  const result = await handleIncomingMessage(
       msg, userId, username, currentBoardText
     );
 
@@ -765,7 +769,16 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
-
+// ── SMS Webhook ──
+app.post('/sms', express.text(), async (req, res) => {
+  try {
+    const result = await handleSmsWebhook(req.body);
+    res.json(result);
+  } catch (err) {
+    console.error('[SMS] Webhook error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 app.get('/learn-status', async (req, res) => {
   try {
     const knowledge = await readKnowledge();
