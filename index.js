@@ -550,8 +550,8 @@ async function handleGroupMessage(bot, msg) {
       await alertAdmin(bot, `✅ Bot registered @${username} → slot ${result.slotNumber} ⏳`, 'SUCCESS');
     }
 
-    // Send response
-    if (result.confidence >= CONFIDENCE_THRESHOLD) {
+    // Send response — ሁልጊዜ ይምለስ
+    if (result.response) {
       const sentMsg = await bot.sendMessage(chatId, result.response, {
         reply_to_message_id: msg.message_id,
       });
@@ -569,7 +569,9 @@ async function handleGroupMessage(bot, msg) {
       if (ratingEnabled) {
         await alertAdmin(
           bot,
-          `🤖 Bot ተናገረ:\n👤 @${username}: "${text}"\n🤖 Bot: "${result.response}"`,
+          `🤖 Bot ተናገረ:
+👤 @${username}: "${text}"
+🤖 Bot: "${result.response}" (${Math.round((result.confidence||0)*100)}%)`,
           'INFO'
         );
         await bot.sendMessage(ADMIN_ID, '⭐ Rating:', {
@@ -585,23 +587,17 @@ async function handleGroupMessage(bot, msg) {
           }
         });
       }
-    } else {
-      const pendingId = `${userId}_${Date.now()}`;
-      pendingResponses.set(pendingId, {
-        chatId,
-        messageId: msg.message_id,
-        response: result.response,
-        userId,
-        username,
-        originalText: text,
-      });
-      await alertAdmin(
-        bot,
-        `⚠️ *Low confidence* (${Math.round(result.confidence * 100)}%)\n\n` +
-        `@${username}: "${text}"\n\nBot: "${result.response}"\n\n` +
-        `/approve_${pendingId} ✅ | /reject_${pendingId} ❌`,
-        'WARNING'
-      );
+
+      // Low confidence ከሆነ admin ያሳውቅ ብቻ — አይቆምም
+      if (result.confidence < CONFIDENCE_THRESHOLD) {
+        await alertAdmin(
+          bot,
+          `⚠️ Low confidence (${Math.round(result.confidence * 100)}%)
+@${username}: "${text}"
+Bot: "${result.response}"`,
+          'WARNING'
+        );
+      }
     }
   } catch (err) {
     console.error('[GROUP] Error:', err.message);
