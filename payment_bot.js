@@ -7,7 +7,7 @@ import {
   saveSmsPayment,
   saveScreenshotPayment,
   cleanupPayments,
-} from './db.js';
+} from './database.js';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
