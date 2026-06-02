@@ -91,7 +91,31 @@ export async function initDB() {
       toggled_by BIGINT
     )
   `);
+// ── Payment SMS ──
+await query(`
+  CREATE TABLE IF NOT EXISTS payment_sms (
+    id SERIAL PRIMARY KEY,
+    ref_no TEXT UNIQUE NOT NULL,
+    amount NUMERIC NOT NULL,
+    type TEXT NOT NULL,
+    raw_sms TEXT,
+    matched BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+  )
+`);
 
+// ── Payment Screenshots ──
+await query(`
+  CREATE TABLE IF NOT EXISTS payment_screenshots (
+    id SERIAL PRIMARY KEY,
+    telegram_id BIGINT NOT NULL,
+    ref_no TEXT,
+    type TEXT,
+    description TEXT,
+    matched BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+  )
+`);
   // ── Token Usage ──
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
@@ -588,5 +612,66 @@ export async function cleanupOldData() {
   console.log('[DB] Cleanup done:', results);
   return results;
 }
+// ===== PAYMENT =====
+export async function saveSmsPayment(refNo, amount, type, rawSms) {
+  await query(`
+    INSERT INTO payment_sms (ref_no, amount, type, raw_sms)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (ref_no) DO NOTHING
+  `, [refNo, amount, type, rawSms]);
 
+  return await tryMatch({ refNo, amount, type });
+}
+
+export async function saveScreenshotPayment(telegramId, refNo, type, description) {
+  await query(`
+    INSERT INTO payment_screenshots (telegram_id, ref_no, type, description)
+    VALUES ($1, $2, $3, $4)
+  `, [telegramId, refNo, type, description]);
+
+  return await tryMatch({ refNo, telegramId });
+}
+
+export async function tryMatch({ refNo, amount, type, telegramId }) {
+  if (!refNo) return { matched: null };
+
+  // SMS ና Screenshot ያዛምዳል
+  const sms = await query(`
+    SELECT * FROM payment_sms WHERE ref_no = $1 AND matched = FALSE
+  `, [refNo]);
+
+  const screenshot = await query(`
+    SELECT * FROM payment_screenshots WHERE ref_no = $1 AND matched = FALSE
+  `, [refNo]);
+
+  if (sms.rows.length > 0 && screenshot.rows.length > 0) {
+    const s = sms.rows[0];
+    const sc = screenshot.rows[0];
+
+    // Match ሆነ — ሁለቱንም ያዘምናል
+    await query(`UPDATE payment_sms SET matched = TRUE WHERE ref_no = $1`, [refNo]);
+    await query(`UPDATE payment_screenshots SET matched = TRUE WHERE ref_no = $1`, [refNo]);
+
+    return {
+      matched: {
+        telegramId: sc.telegram_id,
+        amount: s.amount,
+        type: s.type,
+        refNo,
+      }
+    };
+  }
+
+  return { matched: null };
+}
+
+export async function cleanupPayments() {
+  const sms = await query(`
+    DELETE FROM payment_sms WHERE created_at < NOW() - INTERVAL '2 days'
+  `);
+  const screenshots = await query(`
+    DELETE FROM payment_screenshots WHERE created_at < NOW() - INTERVAL '2 days'
+  `);
+  return { sms: sms.rowCount, screenshots: screenshots.rowCount };
+}
 export { query };
