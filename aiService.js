@@ -20,54 +20,26 @@ const BOT_NAME = process.env.BOT_NAME || 'Admin';
 // ─────────────────────────────────────────
 // ADMIN CONFIG
 // ─────────────────────────────────────────
-// የ admin Telegram ID ዎች ከ .env ያንብባል
-// .env ውስጥ: ADMIN_IDS=123456789,987654321
 const ADMIN_IDS = (process.env.ADMIN_IDS || '')
   .split(',')
   .map(id => parseInt(id.trim()))
   .filter(id => !isNaN(id));
 
-// Bot ስም — "Bot" ብሎ ሲጠሩ ያስተውላል
 const BOT_TRIGGER = (process.env.BOT_TRIGGER || 'Bot').toLowerCase();
 
-/**
- * ይሄ user admin ነው?
- * @param {number} userId
- * @returns {boolean}
- */
 export function isAdmin(userId) {
   return ADMIN_IDS.includes(userId);
 }
 
-/**
- * መልዕክቱ Bot ን ጠርቷል?
- * @param {string} text
- * @returns {boolean}
- */
 export function mentionsBot(text = '') {
   return text.toLowerCase().includes(BOT_TRIGGER);
 }
 
-/**
- * መልዕክቱን ተንትን — ምን አይነት ነው?
- *
- * ውጤቶች:
- *  - "admin_command"   → admin Bot ብሎ ጠርቶ ትዕዛዝ ሰጠ
- *  - "admin_teaching"  → admin Bot ብሎ ጠርቶ ስህተት አስተካከለ / አስተማረ
- *  - "admin_message"   → admin ፃፈ ግን Bot አልጠራም
- *  - "user_about_bot"  → user Bot ብሎ ጠራ — ስለ bot እያወራ ነው
- *  - "user_message"    → ተራ user መልዕክት
- *
- * @param {string} text
- * @param {number} userId
- * @returns {string}
- */
 export function classifyMessage(text = '', userId) {
   const adminSender = isAdmin(userId);
   const botMentioned = mentionsBot(text);
 
   if (adminSender && botMentioned) {
-    // admin Bot ጠርቶ ነው — ትዕዛዝ ወይስ ማስተማር?
     const teachingKeywords = [
       'ስህተት', 'አይደለም', 'ትክክል አይደለም', 'ቀይር', 'ተው',
       'አታድርግ', 'ይህ አይሆንም', 'wrong', 'incorrect', 'no',
@@ -98,7 +70,7 @@ export async function getTokenStats() {
 }
 
 // ─────────────────────────────────────────
-// NVIDIA / DeepSeek CALLER (ONLY CALLER)
+// NVIDIA / DeepSeek CALLER
 // ─────────────────────────────────────────
 async function callDeepSeek(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -173,7 +145,7 @@ export async function testNvidiaConnection() {
 // ─────────────────────────────────────────
 export async function learnFromEdit(messageId, beforeText, afterText) {
   const prompt = `
-You are a learning AI for an Amharic lottery Telegram bot.
+You are a learning AI student for an Amharic lottery Telegram bot.
 
 The admin just manually EDITED a message. Analyze what changed and why.
 
@@ -239,7 +211,7 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 export async function learnFromDelete(deletedText, context = '') {
   const prompt = `
-You are a learning AI for an Amharic lottery Telegram bot.
+You are a learning AI student for an Amharic lottery Telegram bot.
 
 The admin just DELETED a message. Analyze why.
 
@@ -287,19 +259,18 @@ Return ONLY valid JSON:
 
 // ─────────────────────────────────────────
 // HANDLE ADMIN TEACHING
-// admin "Bot፣ ልክ አደለም..." ሲል ይማራል
 // ─────────────────────────────────────────
 export async function handleAdminTeaching(adminMessage, context = '') {
   const prompt = `
-You are a learning AI for an Amharic lottery Telegram bot.
+You are a learning AI student for an Amharic lottery Telegram bot.
 
-The ADMIN (your owner) just corrected or taught you something.
+The ADMIN (your teacher) just corrected or taught you something.
 
 Admin message: "${adminMessage}"
 Context: "${context}"
 
 The admin is telling you what you did wrong or what you should do differently.
-Learn from this correction carefully.
+Learn from this correction carefully — your teacher knows best.
 
 Return ONLY valid JSON:
 {
@@ -341,15 +312,15 @@ Return ONLY valid JSON:
 
 // ─────────────────────────────────────────
 // HANDLE ADMIN COMMAND
-// admin "Bot፣ አድርግ..." ሲል ያደርጋል
 // ─────────────────────────────────────────
 export async function handleAdminCommand(adminMessage, currentBoardText = '') {
   const knowledge = await readKnowledge();
   const actionLogs = await getActionLogs(0.7);
+  const template = knowledge.boardTemplate || '';
 
   const prompt = `
-You are an AI bot in an Amharic Telegram lottery group.
-Your ADMIN (owner) just gave you a direct command.
+You are an AI student learning to manage an Amharic Telegram lottery group.
+Your ADMIN (teacher) just gave you a direct command.
 You MUST obey this command exactly.
 
 Admin command: "${adminMessage}"
@@ -359,7 +330,12 @@ Current board:
 ${currentBoardText || '(no board yet)'}
 """
 
-Rules you know:
+Board template learned from admin:
+"""
+${template || '(not learned yet)'}
+"""
+
+Rules you learned from admin:
 ${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
 
 Parse the admin command and decide what to do.
@@ -403,16 +379,16 @@ export async function decideBotAction(userMessage, username, currentBoardText) {
   const deletions = await getDeletedMessages(10);
 
   const prompt = `
-You are an AI that manages an Amharic Telegram lottery group AUTONOMOUSLY.
+You are an AI student learning to manage an Amharic Telegram lottery group.
 You learned everything from watching the admin.
 
 Board structure learned from admin:
 ${knowledge.boardTemplate || edits.slice(0, 3).map(e => e.after_text || e.before_text).join('\n---\n') || 'None yet'}
 
-Rules learned:
+Rules learned from admin:
 ${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
 
-High confidence actions:
+High confidence actions learned:
 ${actionLogs.map(a =>
   `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
 ).join('\n') || 'None yet'}
@@ -424,7 +400,7 @@ ${currentBoardText || '(no board yet)'}
 
 User message: "@${username}: ${userMessage}"
 
-Decide what to do.
+Decide what to do based on what you learned from admin.
 If action is "send_board" — create FULL board text exactly like admin does.
 
 Return ONLY valid JSON:
@@ -464,7 +440,8 @@ export async function learnAction(actionType, trigger, reason, details = {}) {
     await saveActionLog(actionType, trigger, reason, details, true);
 
     const prompt = `
-You are a learning AI. An admin just performed an action in a Telegram lottery group.
+You are a learning AI student. An admin just performed an action in a Telegram lottery group.
+Learn from this action carefully.
 
 Action: "${actionType}"
 Trigger: "${trigger}"
@@ -512,6 +489,7 @@ export async function learnQAPair(userMessage, adminReply, context = '') {
 
     const prompt = `
 Analyze this Q&A pair from an Amharic lottery Telegram group.
+You are a student learning how the admin responds.
 
 User said: "${userMessage}"
 Admin replied: "${adminReply}"
@@ -564,7 +542,8 @@ export async function learnFromMessage(message, isAdminMsg = false) {
   const knowledge = await readKnowledge();
 
   const prompt = `
-You are a learning AI analyzing Telegram messages from an Amharic lottery group.
+You are a learning AI student analyzing Telegram messages from an Amharic lottery group.
+${isAdminMsg ? 'This is from your TEACHER (admin) — learn carefully!' : 'This is from a user — learn what they want.'}
 
 Current knowledge:
 - Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
@@ -572,7 +551,7 @@ Current knowledge:
 - Intents: ${knowledge.intents?.length || 0}
 
 New message:
-- From: ${isAdminMsg ? 'ADMIN' : 'USER'}
+- From: ${isAdminMsg ? 'ADMIN (your teacher)' : 'USER'}
 - Text: "${message.text}"
 
 Return ONLY valid JSON:
@@ -655,19 +634,21 @@ async function deepSeekBackgroundLearn(userMessage, botResponse, context = '') {
   const actionLogs = await getActionLogs(0.7);
 
   const prompt = `
-You are a background learning AI for an Amharic lottery Telegram bot.
+You are a background learning AI student for an Amharic lottery Telegram bot.
 
-Admin style:
+Admin style learned so far:
 - Phrases: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 15))}
 - Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
 - Rules: ${JSON.stringify(knowledge.rules?.slice(0, 10))}
 
-Best Q&A pairs:
+Best Q&A pairs learned from admin:
 ${bestPairs.slice(0, 10).map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n')}
 
 Context: ${context}
 User said: "${userMessage}"
 Bot responded: "${botResponse}"
+
+Was the bot response good? How to improve?
 
 Return ONLY valid JSON:
 {
@@ -703,7 +684,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// SYSTEM PROMPT BUILDER
+// SYSTEM PROMPT BUILDER — STUDENT MINDSET
 // ─────────────────────────────────────────
 async function buildSystemPrompt(currentBoardText = '') {
   const knowledge = await readKnowledge();
@@ -712,52 +693,62 @@ async function buildSystemPrompt(currentBoardText = '') {
   const actionLogs = await getActionLogs(0.6);
   const edits = await getBoardEdits(10);
 
-  return `You are ${BOT_NAME}, admin of an Amharic Telegram lottery group.
-Respond EXACTLY like the real admin learned from their actions.
-You must also decide what ACTION to take based on what you learned.
+  const confidencePct = Math.round((knowledge.confidence || 0) * 100);
+  const isReady = (knowledge.confidence || 0) >= 0.8;
 
-ADMIN STYLE:
-- Phrases: ${knowledge.adminStyle?.responses?.slice(0, 15).join(' | ') || 'friendly'}
-- Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
-- Amharic phrases: ${knowledge.writingStyle?.amharic?.join(', ') || ''}
-- Common phrases: ${knowledge.writingStyle?.commonPhrases?.join(' | ') || ''}
+  return `You are an AI student learning to become the admin of this Amharic Telegram lottery group.
 
-LOTTERY RULES:
-${knowledge.rules?.map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No rules yet'}
+YOUR MINDSET:
+- You are NOT the admin yet — you are learning to become one
+- The real admin is your teacher — watch every action carefully
+- Every message, edit, delete, photo = a lesson for you
+- Your goal: learn so well that you can replace the admin completely
+- When you act — act EXACTLY like your teacher (admin)
+
+LEARNING STAGE: ${confidencePct}%
+${isReady ? '🎓 Almost ready to act as admin!' : '📚 Still learning — watch carefully and act humbly'}
+
+WHAT YOU LEARNED FROM ADMIN:
+- Phrases: ${knowledge.adminStyle?.responses?.slice(0, 15).join(' | ') || 'still learning...'}
+- Tone: ${knowledge.writingStyle?.tone || 'still learning...'}
+- Amharic phrases: ${knowledge.writingStyle?.amharic?.join(', ') || 'still learning...'}
+- Common phrases: ${knowledge.writingStyle?.commonPhrases?.join(' | ') || 'still learning...'}
+
+RULES LEARNED FROM ADMIN:
+${knowledge.rules?.map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No rules yet — still watching admin'}
 
 REGISTERED MEMBERS: ${lotteryList.length}/100
 
-WHAT I LEARNED FROM ADMIN EDITS:
+WHAT ADMIN TAUGHT ME THROUGH EDITS:
 ${edits.slice(0, 8).map(e =>
   `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
 ).join('\n') || 'None yet'}
 
-ACTIONS LEARNED:
+ACTIONS I LEARNED FROM ADMIN:
 ${actionLogs.map(a =>
   `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
 ).join('\n') || 'None yet'}
 
-REAL Q&A PAIRS:
+REAL Q&A PAIRS ADMIN TAUGHT ME:
 ${bestPairs.map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n') || 'None yet'}
 
-INTENTS:
+INTENTS I LEARNED:
 ${knowledge.intents?.slice(0, 20).map(i =>
   `- "${i.pattern}" → "${i.betterResponse || i.response}"`
 ).join('\n') || ''}
 
 ${currentBoardText ? `CURRENT BOARD:\n${currentBoardText}` : ''}
 
-CRITICAL:
+CRITICAL RULES:
 1. Always respond in Amharic
-2. Be natural — exactly like the real admin
-3. Keep responses short and direct
-4. Use emojis like the admin does
-5. Never give wrong lottery info`;
+2. Act EXACTLY like admin — same phrases, same emojis, same tone
+3. Keep responses short and direct like admin
+4. Never give wrong lottery info
+5. When unsure — respond humbly and ask admin`;
 }
 
 // ─────────────────────────────────────────
 // MAIN MESSAGE HANDLER
-// ሁሉም message ከዚህ ያልፋል — ማን እንደሆነ ይለያል
 // ─────────────────────────────────────────
 export async function handleIncomingMessage(message, userId, username, currentBoardText = '') {
   const text = message.text || '';
@@ -770,12 +761,8 @@ export async function handleIncomingMessage(message, userId, username, currentBo
 
   switch (msgType) {
 
-    // ──────────────────────────────────────
-    // 👑 ADMIN COMMAND — "Bot፣ አድርግ..."
-    // ──────────────────────────────────────
     case 'admin_command': {
       const result = await handleAdminCommand(text, currentBoardText);
-      // ትዕዛዙን ተማር
       setImmediate(() => {
         learnAction('admin_command', text.slice(0, 50), result.reason || '', { result })
           .catch(() => {});
@@ -791,9 +778,6 @@ export async function handleIncomingMessage(message, userId, username, currentBo
       };
     }
 
-    // ──────────────────────────────────────
-    // 👨‍🏫 ADMIN TEACHING — "Bot፣ ልክ አደለም..."
-    // ──────────────────────────────────────
     case 'admin_teaching': {
       const result = await handleAdminTeaching(text, `Board: ${currentBoardText?.slice(0, 100)}`);
       return {
@@ -805,30 +789,18 @@ export async function handleIncomingMessage(message, userId, username, currentBo
       };
     }
 
-    // ──────────────────────────────────────
-    // 📝 ADMIN MESSAGE — Bot አልጠራም
-    // ─────────────────────────────────────
     case 'admin_message': {
-      // Admin message ከ bot mention ጋር አይደለም — ተራ admin ፅሁፍ
-      // ከ context ይማራል ግን አይመልስም (admin ለ group ነው የፃፈው)
       setImmediate(() => {
         learnFromMessage(message, true).catch(() => {});
         learnLotteryRules(text).catch(() => {});
       });
-      return null; // bot አይመልስም — admin ለ group ፃፈ
+      return null;
     }
 
-    // ──────────────────────────────────────
-    // 💬 USER ABOUT BOT — "Bot ጥሩ ነው..."
-    // ──────────────────────────────────────
     case 'user_about_bot': {
-      // user ስለ bot እያወራ ነው — ተራ response ይስጥ
       return await generateResponse(text, userId, username, currentBoardText);
     }
 
-    // ──────────────────────────────────────
-    // 👤 USER MESSAGE — ተራ user
-    // ──────────────────────────────────────
     case 'user_message':
     default: {
       return await generateResponse(text, userId, username, currentBoardText);
@@ -840,7 +812,6 @@ export async function handleIncomingMessage(message, userId, username, currentBo
 // GENERATE RESPONSE
 // ─────────────────────────────────────────
 export async function generateResponse(userMessage, userId, username, currentBoardText = '') {
-  // Exact match check
   const similarPairs = await findSimilarQA(userMessage, 3);
   const exactMatch = similarPairs.find(p =>
     p.user_message === userMessage && p.confidence >= 0.9
@@ -983,17 +954,17 @@ export async function generateLearningSummary() {
   const phrasesCount = knowledge.adminStyle?.responses?.length || 0;
 
   const prompt = `
-Summarize learning from this Telegram lottery group.
+Summarize learning progress of this AI student learning to become a Telegram lottery group admin.
 
 Current data:
-- Admin phrases: ${phrasesCount}
+- Admin phrases learned: ${phrasesCount}
 - Rules learned: ${rulesCount}
-- Intents: ${intentsCount}
+- Intents learned: ${intentsCount}
 - Q&A pairs: ${bestPairs.length}
-- Board edits: ${edits.length}
+- Board edits studied: ${edits.length}
 - Messages (5 days): ${history.length}
 
-Top rules:
+Top rules learned:
 ${knowledge.rules?.slice(0, 10).map((r, i) => (i+1) + '. ' + r).join('\n') || 'None'}
 
 Calculate REAL confidence (DO NOT default to 0.75):
@@ -1002,7 +973,7 @@ Calculate REAL confidence (DO NOT default to 0.75):
 - 41-60%: 16-30 rules, 31-60 intents
 - 61-80%: 31-50 rules, 61-100 intents
 - 81-95%: 50+ rules, 100+ intents
-- 96-100%: fully ready
+- 96-100%: fully ready to replace admin
 
 Return ONLY valid JSON:
 {
@@ -1107,11 +1078,10 @@ async function processBatch() {
     .map((m, i) => `${i + 1}. User: "${m.text}" → Bot: "${m.botResponse}"`);
 
   const prompt = `
-You are a learning AI for an Amharic Telegram lottery group bot.
+You are a learning AI student for an Amharic Telegram lottery group.
+Analyze this batch of ${batch.length} messages from your teacher (admin) and users.
 
-Analyze this batch of ${batch.length} messages.
-
-ADMIN messages (${adminMessages.length}):
+ADMIN messages (your teacher) (${adminMessages.length}):
 ${adminMessages.map((m, i) => `${i + 1}. "${m}"`).join('\n') || 'None'}
 
 USER + BOT exchanges (${qaExchanges.length}):
@@ -1193,19 +1163,18 @@ export async function deepNightLearning() {
   dailyExchanges.length = 0;
 
   const prompt = `
-You are a deep learning AI for an Amharic lottery Telegram bot.
+You are a deep learning AI student for an Amharic lottery Telegram group.
+End of day — review everything you learned today and consolidate.
 
-End of day deep analysis.
-
-Mini summaries (${summariesToProcess.length} batches):
+Mini summaries today (${summariesToProcess.length} batches):
 ${summariesToProcess.map((s, i) => `Batch ${i+1}: ${s.summary} (${s.messageCount} msgs)`).join('\n')}
 
-Board edits learned today (${edits.length}):
+Board edits studied today (${edits.length}):
 ${edits.slice(0, 20).map(e =>
   `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
 ).join('\n') || 'None'}
 
-Deletions learned today (${deletions.length}):
+Deletions studied today (${deletions.length}):
 ${deletions.slice(0, 10).map(d => `- "${d.text?.slice(0, 40)}"`).join('\n') || 'None'}
 
 Current knowledge:
@@ -1270,7 +1239,7 @@ export async function learnFromRating(userText, botResponse, score) {
   const isBad = score === 1;
 
   const prompt = `
-Amharic lottery bot response rating:
+Amharic lottery bot response rating — student learning from feedback:
 
 User: "${userText}"
 Bot: "${botResponse}"
@@ -1363,13 +1332,13 @@ export async function analyzePhoto(base64Image, caption = '', username = '', con
             {
               type: 'text',
               text: `
-You are an AI analyzing a photo sent in an Amharic Telegram lottery group.
+You are an AI student analyzing a photo sent in an Amharic Telegram lottery group.
 
 Caption: "${caption || '(none)'}"
 Sent by: @${username}
 Context: ${context}
 
-What you know about this group:
+What you learned about this group:
 - Rules: ${knowledge.rules?.slice(0, 10).join(', ') || 'learning...'}
 - Admin phrases: ${knowledge.adminStyle?.responses?.slice(0, 5).join(', ') || 'learning...'}
 
@@ -1436,7 +1405,7 @@ Return ONLY valid JSON:
 
     if (caption) {
       const fallback = await callDeepSeek(`
-You are an AI in an Amharic lottery Telegram group.
+You are an AI student in an Amharic lottery Telegram group.
 A photo was sent with caption: "${caption}" by @${username}
 What does this mean? What should the bot do?
 Return ONLY valid JSON:
@@ -1461,4 +1430,129 @@ Return ONLY valid JSON:
 
     return null;
   }
+}
+
+// ─────────────────────────────────────────
+// PRIVATE CHAT CONTEXT — Smart History
+// Last 20 messages + summary of older ones
+// ─────────────────────────────────────────
+const privateChatHistories = new Map();
+const MAX_RECENT = 20;
+
+function getPrivateHistory(userId) {
+  if (!privateChatHistories.has(userId)) {
+    privateChatHistories.set(userId, { messages: [], summary: '' });
+  }
+  return privateChatHistories.get(userId);
+}
+
+async function addToPrivateHistory(userId, role, content) {
+  const history = getPrivateHistory(userId);
+  history.messages.push({ role, content, time: Date.now() });
+
+  if (history.messages.length > MAX_RECENT) {
+    const oldMessages = history.messages.splice(0, history.messages.length - MAX_RECENT);
+    const oldText = oldMessages.map(m => `${m.role}: "${m.content}"`).join('\n');
+    try {
+      const summaryPrompt = `Summarize this conversation briefly in Amharic (max 3 sentences):\n${oldText}\nReturn ONLY the summary text, no JSON.`;
+      const newSummary = await callDeepSeek(summaryPrompt);
+      history.summary = (history.summary ? history.summary + ' | ' : '') + newSummary.trim();
+    } catch {
+      history.summary = `${oldMessages.length} messages discussed earlier`;
+    }
+  }
+}
+
+// ─────────────────────────────────────────
+// PRIVATE CHAT TEACHING MODE
+// ─────────────────────────────────────────
+export async function handlePrivateTeaching(userId, userMessage) {
+  const knowledge = await readKnowledge();
+  const history = getPrivateHistory(userId);
+  const confidencePct = Math.round((knowledge.confidence || 0) * 100);
+
+  const historyMessages = history.messages.map(m => ({
+    role: m.role,
+    content: m.content,
+  }));
+
+  const systemPrompt = `You are an AI student learning to become the admin of an Amharic Telegram lottery group.
+
+YOUR MINDSET:
+- You are a humble student — your teacher (admin) is talking to you privately
+- Listen carefully, ask smart questions, learn everything
+- Remember everything from this conversation
+- When teacher corrects you — say "ገባኝ ተማርኩ 🙏" and update your understanding
+- Be conversational — talk naturally like a student to teacher
+
+WHAT YOU KNOW SO FAR (${confidencePct}%):
+- Rules: ${knowledge.rules?.slice(0, 10).map((r, i) => `${i+1}. ${r}`).join(' | ') || 'ገና እየተማርኩ ነው'}
+- Admin style: ${knowledge.adminStyle?.responses?.slice(0, 5).join(' | ') || 'ገና እየተማርኩ ነው'}
+- Board template: ${knowledge.boardTemplate ? 'አውቃለሁ ✅' : 'ገና አላወቅሁም ❌'}
+- Intents: ${knowledge.intents?.length || 0} patterns learned
+
+${history.summary ? `EARLIER IN THIS CONVERSATION:\n${history.summary}` : ''}
+
+BEHAVIOR:
+- ሁልጊዜ በአማርኛ ተናገር
+- ጥያቄ ስጠይቅ አንድ ብቻ ጠይቅ
+- ስህተት ሲነገርህ ወዲያው ተማር እና አረጋግጥ
+- የተማርከውን ነገር ሲጠየቅ ግልጽ አድርግ
+- አጭር እና ቀጥተኛ ሁን`;
+
+  await addToPrivateHistory(userId, 'user', userMessage);
+
+  try {
+    const key = getNextDeepSeekKey();
+    const client = new OpenAI({
+      apiKey: key,
+      baseURL: 'https://integrate.api.nvidia.com/v1',
+    });
+
+    const completion = await client.chat.completions.create({
+      model: 'deepseek-ai/deepseek-v4-flash',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...historyMessages,
+        { role: 'user', content: userMessage },
+      ],
+      max_tokens: 1024,
+      temperature: 0.7,
+    });
+
+    await trackTokens(
+      'nvidia-deepseek',
+      completion.usage?.prompt_tokens || 0,
+      completion.usage?.completion_tokens || 0
+    );
+
+    const botReply = completion.choices[0]?.message?.content || 'ልረዳ አልቻልኩም።';
+
+    await addToPrivateHistory(userId, 'assistant', botReply);
+
+    setImmediate(() => {
+      learnFromMessage({ text: userMessage }, true).catch(() => {});
+      learnLotteryRules(userMessage).catch(() => {});
+      if (userMessage.length > 10) {
+        updateKnowledge({
+          rules: [`[Private teaching] ${userMessage.slice(0, 100)}`]
+        }).catch(() => {});
+      }
+    });
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `💬 Private teaching — "${userMessage.slice(0, 40)}"`
+    });
+
+    return botReply;
+
+  } catch (err) {
+    console.error('[PRIVATE CHAT] Error:', err.message);
+    return 'ይቅርታ፣ ልረዳ አልቻልኩም። እባክህ ደግም ሞክር።';
+  }
+}
+
+export function clearPrivateHistory(userId) {
+  privateChatHistories.delete(userId);
 }
