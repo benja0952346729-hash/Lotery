@@ -9,6 +9,7 @@ import {
   cleanupPayments,
   saveLotteryResult,
   saveLotteryLiveEvent,
+  cleanupLotteryResults,
 } from './database.js';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -395,4 +396,8 @@ async function downloadImageAsBase64(url) {
 setInterval(async () => {
   const result = await cleanupPayments();
   console.log('[Payment] Cleanup result:', result);
+
+  // Lottery — 2 ቀን አሮጌ records ሰርዝ
+  const lotteryClean = await cleanupLotteryResults();
+  console.log('[Lottery] Cleanup result:', lotteryClean);
 }, 1000 * 60 * 60 * 6);
