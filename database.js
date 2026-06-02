@@ -91,31 +91,33 @@ export async function initDB() {
       toggled_by BIGINT
     )
   `);
-// ── Payment SMS ──
-await query(`
-  CREATE TABLE IF NOT EXISTS payment_sms (
-    id SERIAL PRIMARY KEY,
-    ref_no TEXT UNIQUE NOT NULL,
-    amount NUMERIC NOT NULL,
-    type TEXT NOT NULL,
-    raw_sms TEXT,
-    matched BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT NOW()
-  )
-`);
 
-// ── Payment Screenshots ──
-await query(`
-  CREATE TABLE IF NOT EXISTS payment_screenshots (
-    id SERIAL PRIMARY KEY,
-    telegram_id BIGINT NOT NULL,
-    ref_no TEXT,
-    type TEXT,
-    description TEXT,
-    matched BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT NOW()
-  )
-`);
+  // ── Payment SMS ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS payment_sms (
+      id SERIAL PRIMARY KEY,
+      ref_no TEXT UNIQUE NOT NULL,
+      amount NUMERIC NOT NULL,
+      type TEXT NOT NULL,
+      raw_sms TEXT,
+      matched BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  // ── Payment Screenshots ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS payment_screenshots (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT NOT NULL,
+      ref_no TEXT,
+      type TEXT,
+      description TEXT,
+      matched BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
   // ── Token Usage ──
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
@@ -162,7 +164,7 @@ await query(`
     )
   `);
 
-  // ── Board Messages — admin board ሲልክ message_id ይቀመጣል ──
+  // ── Board Messages ──
   await query(`
     CREATE TABLE IF NOT EXISTS board_messages (
       id SERIAL PRIMARY KEY,
@@ -173,7 +175,7 @@ await query(`
     )
   `);
 
-  // ── Board Edits — admin manually edit ሲያደርግ before/after ──
+  // ── Board Edits ──
   await query(`
     CREATE TABLE IF NOT EXISTS board_edits (
       id SERIAL PRIMARY KEY,
@@ -186,7 +188,7 @@ await query(`
     )
   `);
 
-  // ── Deleted Messages — admin message ሲሰርዝ ──
+  // ── Deleted Messages ──
   await query(`
     CREATE TABLE IF NOT EXISTS deleted_messages (
       id SERIAL PRIMARY KEY,
@@ -274,8 +276,6 @@ export async function saveHistory(message) {
     message.text || '',
     message._isAdmin || false,
   ]);
-
-
 }
 
 export async function getHistory(days = 7) {
@@ -289,8 +289,6 @@ export async function getHistory(days = 7) {
 }
 
 // ===== BOARD MESSAGES =====
-
-// Admin board message ሲልክ → message_id ያስቀምጣል
 export async function saveBoardMessage(messageId, chatId, text) {
   await query(`
     INSERT INTO board_messages (message_id, chat_id, text)
@@ -299,7 +297,6 @@ export async function saveBoardMessage(messageId, chatId, text) {
   `, [messageId, chatId, text]);
 }
 
-// Current board message ያወጣል
 export async function getBoardMessage() {
   const res = await query(`
     SELECT * FROM board_messages ORDER BY sent_at DESC LIMIT 1
@@ -307,7 +304,6 @@ export async function getBoardMessage() {
   return res.rows[0] || null;
 }
 
-// Board message text ያዘምናል (bot edit ሲያደርግ)
 export async function updateBoardMessageText(messageId, newText) {
   await query(`
     UPDATE board_messages SET text = $1 WHERE message_id = $2
@@ -315,8 +311,6 @@ export async function updateBoardMessageText(messageId, newText) {
 }
 
 // ===== BOARD EDITS =====
-
-// Admin manually edit ሲያደርግ → before/after ያስቀምጣል
 export async function saveBoardEdit(messageId, chatId, beforeText, afterText) {
   await query(`
     INSERT INTO board_edits (message_id, chat_id, before_text, after_text)
@@ -324,7 +318,6 @@ export async function saveBoardEdit(messageId, chatId, beforeText, afterText) {
   `, [messageId, chatId, beforeText, afterText]);
 }
 
-// DeepSeek ያላወቀ edits ያወጣል
 export async function getUnlearnedEdits(limit = 20) {
   const res = await query(`
     SELECT * FROM board_edits
@@ -335,12 +328,10 @@ export async function getUnlearnedEdits(limit = 20) {
   return res.rows;
 }
 
-// Edit ተምሯል ብሎ ያስቀምጣል
 export async function markEditLearned(id) {
   await query(`UPDATE board_edits SET learned = TRUE WHERE id = $1`, [id]);
 }
 
-// All edits ያወጣል — DeepSeek ለማስተማር
 export async function getBoardEdits(limit = 50) {
   const res = await query(`
     SELECT * FROM board_edits ORDER BY edited_at DESC LIMIT $1
@@ -349,8 +340,6 @@ export async function getBoardEdits(limit = 50) {
 }
 
 // ===== DELETED MESSAGES =====
-
-// Admin message ሲሰርዝ → ያስቀምጣል
 export async function saveDeletedMessage(messageId, chatId, text) {
   await query(`
     INSERT INTO deleted_messages (message_id, chat_id, text)
@@ -358,7 +347,6 @@ export async function saveDeletedMessage(messageId, chatId, text) {
   `, [messageId, chatId, text || '']);
 }
 
-// Deleted messages ያወጣል
 export async function getDeletedMessages(limit = 20) {
   const res = await query(`
     SELECT * FROM deleted_messages ORDER BY deleted_at DESC LIMIT $1
@@ -580,62 +568,80 @@ export async function resetTokenUsage() {
   await query(`UPDATE token_usage SET input_tokens=0, output_tokens=0, calls=0, updated_at=NOW()`);
 }
 
-// ===== CLEANUP — 5 ቀን ያለፈ raw data ያጠፋ =====
-// Knowledge አይጠፋም — raw collected data ብቻ ነው የሚጠፋው
+// ===== CLEANUP =====
 export async function cleanupOldData() {
   const results = {};
 
-  // History — 5 ቀን
   const h = await query(`DELETE FROM history WHERE created_at < NOW() - INTERVAL '5 days'`);
   results.history = h.rowCount;
 
-  // Board edits — 5 ቀን
   const be = await query(`DELETE FROM board_edits WHERE edited_at < NOW() - INTERVAL '5 days'`);
   results.boardEdits = be.rowCount;
 
-  // Deleted messages — 5 ቀን
   const dm = await query(`DELETE FROM deleted_messages WHERE deleted_at < NOW() - INTERVAL '5 days'`);
   results.deletedMessages = dm.rowCount;
 
-  // Board messages — 5 ቀን
   const bm = await query(`DELETE FROM board_messages WHERE sent_at < NOW() - INTERVAL '5 days'`);
   results.boardMessages = bm.rowCount;
 
-  // Action logs — 5 ቀን
   const al = await query(`DELETE FROM action_logs WHERE updated_at < NOW() - INTERVAL '5 days'`);
   results.actionLogs = al.rowCount;
 
-  // QA pairs — 5 ቀን
   const qa = await query(`DELETE FROM qa_pairs WHERE updated_at < NOW() - INTERVAL '5 days'`);
   results.qaPairs = qa.rowCount;
 
   console.log('[DB] Cleanup done:', results);
   return results;
 }
+
 // ===== PAYMENT =====
 export async function saveSmsPayment(refNo, amount, type, rawSms) {
-  await query(`
+  console.log(`[DB] saveSmsPayment called — Ref: ${refNo} | Amount: ${amount} | Type: ${type}`);
+
+  const res = await query(`
     INSERT INTO payment_sms (ref_no, amount, type, raw_sms)
     VALUES ($1, $2, $3, $4)
     ON CONFLICT (ref_no) DO NOTHING
   `, [refNo, amount, type, rawSms]);
 
-  return await tryMatch({ refNo, amount, type });
+  if (res.rowCount === 0) {
+    console.log(`[DB] SMS skipped — ref_no already exists: ${refNo}`);
+  } else {
+    console.log(`[DB] SMS saved ✅ — Ref: ${refNo} | Amount: ${amount} | Type: ${type}`);
+  }
+
+  const matchResult = await tryMatch({ refNo, amount, type });
+  console.log(`[DB] saveSmsPayment match result:`, JSON.stringify(matchResult));
+  return matchResult;
 }
 
 export async function saveScreenshotPayment(telegramId, refNo, type, description) {
-  await query(`
+  console.log(`[DB] saveScreenshotPayment called — TelegramID: ${telegramId} | Ref: ${refNo} | Type: ${type}`);
+
+  const res = await query(`
     INSERT INTO payment_screenshots (telegram_id, ref_no, type, description)
     VALUES ($1, $2, $3, $4)
   `, [telegramId, refNo, type, description]);
 
-  return await tryMatch({ refNo, telegramId });
+  if (res.rowCount === 0) {
+    console.log(`[DB] Screenshot NOT saved — rowCount: 0`);
+  } else {
+    console.log(`[DB] Screenshot saved ✅ — TelegramID: ${telegramId} | Ref: ${refNo}`);
+  }
+
+  const matchResult = await tryMatch({ refNo, telegramId });
+  console.log(`[DB] saveScreenshotPayment match result:`, JSON.stringify(matchResult));
+  return matchResult;
 }
 
 export async function tryMatch({ refNo, amount, type, telegramId }) {
-  if (!refNo) return { matched: null };
+  console.log(`[DB] tryMatch called — Ref: ${refNo} | TelegramID: ${telegramId || 'N/A'}`);
 
-  // SMS ና Screenshot ያዛምዳል
+  if (!refNo) {
+    console.log('[DB] tryMatch — refNo የለም, skipping');
+    return { matched: null };
+  }
+
   const sms = await query(`
     SELECT * FROM payment_sms WHERE ref_no = $1 AND matched = FALSE
   `, [refNo]);
@@ -644,13 +650,18 @@ export async function tryMatch({ refNo, amount, type, telegramId }) {
     SELECT * FROM payment_screenshots WHERE ref_no = $1 AND matched = FALSE
   `, [refNo]);
 
+  console.log(`[DB] tryMatch — SMS rows: ${sms.rows.length} | Screenshot rows: ${screenshot.rows.length}`);
+
   if (sms.rows.length > 0 && screenshot.rows.length > 0) {
     const s = sms.rows[0];
     const sc = screenshot.rows[0];
 
-    // Match ሆነ — ሁለቱንም ያዘምናል
+    console.log(`[DB] ✅ MATCH FOUND! Ref: ${refNo} | TelegramID: ${sc.telegram_id} | Amount: ${s.amount}`);
+
     await query(`UPDATE payment_sms SET matched = TRUE WHERE ref_no = $1`, [refNo]);
     await query(`UPDATE payment_screenshots SET matched = TRUE WHERE ref_no = $1`, [refNo]);
+
+    console.log(`[DB] Both records marked as matched ✅`);
 
     return {
       matched: {
@@ -662,16 +673,20 @@ export async function tryMatch({ refNo, amount, type, telegramId }) {
     };
   }
 
+  console.log(`[DB] No match yet — SMS: ${sms.rows.length > 0 ? '✅' : '❌'} | Screenshot: ${screenshot.rows.length > 0 ? '✅' : '❌'} | Ref: ${refNo}`);
   return { matched: null };
 }
 
 export async function cleanupPayments() {
+  console.log('[DB] cleanupPayments running...');
   const sms = await query(`
     DELETE FROM payment_sms WHERE created_at < NOW() - INTERVAL '2 days'
   `);
   const screenshots = await query(`
     DELETE FROM payment_screenshots WHERE created_at < NOW() - INTERVAL '2 days'
   `);
+  console.log(`[DB] Cleanup done — SMS: ${sms.rowCount} | Screenshots: ${screenshots.rowCount}`);
   return { sms: sms.rowCount, screenshots: screenshots.rowCount };
 }
+
 export { query };
