@@ -25,7 +25,7 @@ import {
   clearPrivateHistory,
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
-import { handlePaymentPhoto, handleSmsWebhook } from './payment_bot.js';
+import { handlePaymentPhoto, handleSmsWebhook, handleLotteryPhoto, handleLotterySticker } from './payment_bot.js';
 import {
   learnBoardAction,
   handlePrivateBoardTeaching,
@@ -282,10 +282,19 @@ async function handleGroupMessage(bot, msg) {
     cacheMessage(msg.message_id, text, userId, chatId);
   }
 
-  // ── ADMIN PHOTO ──
-  if (msg.photo) {
-    if (isAdmin(userId)) {
-      const caption = msg.caption || "";
+// ── STICKER ──
+if (msg.sticker) {
+  if (isAdmin(userId)) {
+    await handleLotterySticker(bot, msg);
+  }
+  return;
+}
+
+// ── ADMIN PHOTO ──
+if (msg.photo) {
+  if (isAdmin(userId)) {
+    await handleLotteryPhoto(bot, msg);
+    const caption = msg.caption || "";
       if (caption) {
         learnFromMessage({ ...msg, text: caption }, true).catch(() => {});
         learnLotteryRules(caption).catch(() => {});
