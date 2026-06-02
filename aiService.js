@@ -1533,11 +1533,22 @@ BEHAVIOR:
     setImmediate(() => {
       learnFromMessage({ text: userMessage }, true).catch(() => {});
       learnLotteryRules(userMessage).catch(() => {});
-      if (userMessage.length > 10) {
-        updateKnowledge({
-          rules: [`[Private teaching] ${userMessage.slice(0, 100)}`]
-        }).catch(() => {});
-      }
+
+      // Q&A pair ሆኖ ቀምጥ — user message + bot reply ሁለቱም
+      saveQAPair(userMessage, botReply, 'private_teaching', '', true).catch(() => {});
+
+      // Intent ሆኖ ቀምጥ — group ላይ ይጠቀምበታል
+      updateKnowledge({
+        intents: [{
+          pattern: userMessage,
+          meaning: 'admin taught this privately',
+          response: botReply,
+          betterResponse: botReply,
+        }],
+        adminStyle: {
+          responses: [botReply],
+        }
+      }).catch(() => {});
     });
 
     learningEvents.emit('activity', {
