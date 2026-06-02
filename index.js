@@ -26,6 +26,17 @@ import {
 } from './aiService.js';
 import { getKeyStats } from './keys.js';
 
+import {
+  learnBoardAction,
+  handlePrivateBoardTeaching,
+  onBoardCreated,
+  onBoardEdited,
+  onBoardReplaced,
+  onAdminReply,
+  decideBoardAction,
+  nightlyBoardReview,
+} from './boardLearning.js';
+
 // ============================================================
 // 👑 ADMIN HANDLER
 // ============================================================
@@ -315,8 +326,9 @@ async function handleGroupMessage(bot, msg) {
 
       if (repliedUserId !== ADMIN_ID && userText) {
         setImmediate(() => {
-          learnQAPair(userText, text, `Group reply by admin`).catch(() => {});
-        });
+  learnQAPair(userText, text, `Group reply by admin`).catch(() => {});
+  onAdminReply(userText, text, username, 'reply').catch(() => {});
+});
 
         addToBuffer(
           { text: `[BOT_CORRECTION] User ጠየቀ: "${userText}" — ትክክለኛ መልስ: "${text}"` },
@@ -372,11 +384,13 @@ async function handleGroupMessage(bot, msg) {
       const existingBoard = await getBoardMessage();
       await updateKnowledge({ boardTemplate: text });
       await saveBoardMessage(msg.message_id, chatId, text);
-
+      await onBoardCreated(msg.message_id, chatId, text, userId);
+      
       if (existingBoard?.message_id && existingBoard.message_id !== msg.message_id) {
         setImmediate(() => {
-          learnFromDelete(existingBoard.text, 'admin_replaced_board').catch(() => {});
-          learnAction(
+  learnFromDelete(existingBoard.text, 'admin_replaced_board').catch(() => {});
+  onBoardReplaced(existingBoard.message_id, existingBoard.text, text, userId).catch(() => {});
+  learnAction(
             'board_replaced',
             existingBoard.text?.slice(0, 100) || '',
             'Admin posted new board — bot must learn: when admin replaces board, bot should do same with its own message',
@@ -853,8 +867,11 @@ bot.on('message', async (msg) => {
 
         // ── Interactive teaching mode ──
         await bot.sendChatAction(chatId, 'typing');
-        const reply = await handlePrivateTeaching(userId, text);
-        await bot.sendMessage(chatId, reply);
+        const [reply] = await Promise.all([
+  handlePrivateTeaching(userId, text),
+  handlePrivateBoardTeaching(userId, text),
+]);
+await bot.sendMessage(chatId, reply);
 
       } else {
         await bot.sendMessage(chatId, 'ይህ bot ለ admin ብቻ ነው።');
@@ -941,7 +958,7 @@ bot.on('edited_message', async (msg) => {
       learnFromEdit(messageId, beforeText, afterText)
         .catch(err => console.error('[EDIT] Learn error:', err.message));
     });
-
+    await onBoardEdited(messageId, beforeText, afterText, userId);
     learningEvents.emit('activity', {
       type: 'learn',
       msg: `✏️ Edit detected & learned — message ${messageId}`
@@ -1036,6 +1053,7 @@ cron.schedule('0 23 * * *', async () => {
     await alertAdmin(bot, '🌙 24hr Deep Learning እየጀመረ...', 'INFO');
 
     const result = await deepNightLearning();
+    await nightlyBoardReview();
     if (result) {
       await bot.sendMessage(
         ADMIN_ID,
