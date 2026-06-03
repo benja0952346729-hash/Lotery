@@ -780,12 +780,11 @@ app.get('/health', (req, res) => {
 });
 // ── SMS Webhook ──
 app.post('/sms', express.text({ type: '*/*' }), async (req, res) => {
+  res.json({ success: true, received: true });
   try {
-    const result = await handleSmsWebhook(req.body);
-    res.json(result);
+    await handleSmsWebhook(req.body);
   } catch (err) {
     console.error('[SMS] Webhook error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
   }
 });
 app.get('/learn-status', async (req, res) => {
