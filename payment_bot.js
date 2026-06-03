@@ -11,6 +11,7 @@ import {
   saveLotteryLiveEvent,
   cleanupLotteryResults,
   getSmsPaymentByRef,
+  isRefMatchedAlready,
 } from './database.js';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -42,7 +43,6 @@ export async function handleSmsWebhook(rawSms) {
   }
 
   const result = await saveSmsPayment(refNo, amount, type, rawSms);
-
   return { success: true, matched: result.matched || null, ...parsed };
 }
 
@@ -70,20 +70,9 @@ export async function handlePaymentPhoto(bot, msg) {
     const analysis = await analyzeScreenshot(imageBase64);
     console.log(`[Payment] Screenshot analysis for ${telegramId}:`, analysis);
 
-    const saved = await saveScreenshotPayment(
-      telegramId,
-      analysis.refNo,
-      analysis.photoType,
-      analysis.description
-    );
-
     if (analysis.photoType !== 'CBE' && analysis.photoType !== 'Telebirr') {
       const amharicDesc = await describePhotoInAmharic(analysis.description);
-      await bot.sendMessage(
-        chatId,
-        amharicDesc,
-        { reply_to_message_id: msg.message_id }
-      );
+      await bot.sendMessage(chatId, amharicDesc, { reply_to_message_id: msg.message_id });
       return;
     }
 
@@ -95,6 +84,24 @@ export async function handlePaymentPhoto(bot, msg) {
       );
       return;
     }
+
+    // ── Match ከሆነ በኋላ ድጋሚ screenshot ሲላኩ ──
+    const alreadyMatched = await isRefMatchedAlready(analysis.refNo);
+    if (alreadyMatched) {
+      await bot.sendMessage(
+        chatId,
+        `⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።`,
+        { reply_to_message_id: msg.message_id }
+      );
+      return;
+    }
+
+    const saved = await saveScreenshotPayment(
+      telegramId,
+      analysis.refNo,
+      analysis.photoType,
+      analysis.description
+    );
 
     if (saved.matched) {
       await notifyMatch(bot, saved.matched, msg.message_id, chatId);
@@ -149,8 +156,6 @@ export async function handleLotteryPhoto(bot, msg) {
       status: 'ውጤት ታወጀ',
     });
 
-    console.log(`[Lottery] ✅ Saved — Series: ${result.series} | 1ኛ: ${result.first} | 2ኛ: ${result.second} | 3ኛ: ${result.third}`);
-
     await bot.sendMessage(
       chatId,
       `✅ ውጤት ታወጀ!\n` +
@@ -182,8 +187,6 @@ export async function handleLotterySticker(bot, msg) {
       isLive: true,
       triggeredAt: new Date().toISOString(),
     });
-
-    console.log(`[Lottery] ✅ Live event saved`);
 
     await bot.sendMessage(chatId, '🔴 Live — ዕጣ እየወጣ ነው!', {
       reply_to_message_id: msg.message_id,
@@ -245,7 +248,7 @@ async function parseSms(sms) {
     };
   }
 
-  // REF ከሌለ → null ይመልስ → ignore ይሆናል
+  // REF ከሌለ → null → ignore
   return null;
 }
 
