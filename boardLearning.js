@@ -1,97 +1,45 @@
+// boardLearning.js — FIXED VERSION WITH PARALLEL PROCESSING & KEY POOLS
 // ============================================================
 // 📋 BOARD LEARNING — ሁሉም ከ Admin ይማራል
-// boardLearning.js
-// ============================================================
-//
-// ይህ module:
-// • Admin board ሲፈጥር፣ ሲEdit፣ ሲሰርዝ፣ ሲተካ ይማራል
-// • Private chat ውስጥ admin rules ይጽፋል፣ ይሰርዛል፣ ይቀይራል
-// • DeepSeek AI ሙሉ context ሰጥቶ ይማራል
-// • Hard-code rules የሉም — AI ብቻ ይወስናል
-// • aiService.js + database.js ጋር ይሰራል
 // ============================================================
 
 import { query, readKnowledge, updateKnowledge, getBoardMessage } from './database.js';
 import { learningEvents } from './aiService.js';
+import { getLearningDeepSeekKey, rotateResponseDeepSeekKey } from './keys.js';
+import { callDeepSeekAPI, callMultipleAPIsInParallel } from './aiService.js';
 
 const NVIDIA_API_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const DEEPSEEK_MODEL = 'deepseek-ai/deepseek-r1';
-
-// ── DeepSeek ጋር ይነጋገራል ──
-async function askDeepSeek(systemPrompt, userPrompt, apiKey) {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const response = await fetch(NVIDIA_API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: DEEPSEEK_MODEL,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.2,
-          max_tokens: 1500,
-        }),
-      });
-
-      const data = await response.json();
-      const text = data.choices?.[0]?.message?.content || '';
-
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
-      return null;
-    } catch (err) {
-      if (attempt === 3) {
-        console.error('[BoardLearning] DeepSeek error:', err.message);
-        return null;
-      }
-      await new Promise(r => setTimeout(r, 1000 * attempt));
-    }
-  }
-}
-
-// ── API Key ያምጣ ──
-function getApiKey() {
-  const keys = (process.env.NVIDIA_API_KEYS || process.env.NVIDIA_API_KEY || '').split(',').filter(Boolean);
-  return keys[Math.floor(Math.random() * keys.length)] || null;
-}
 
 // ============================================================
 // 📚 CONTEXT BUILDER — ሙሉ context ለ DeepSeek
 // ============================================================
 async function buildBoardContext() {
   try {
-    const knowledge = await readKnowledge();
-
-    const recentEdits = await query(`
-      SELECT before_text, after_text, edited_at
-      FROM board_edits
-      ORDER BY edited_at DESC
-      LIMIT 20
-    `);
-
-    const recentHistory = await query(`
-      SELECT text, is_admin, created_at
-      FROM messages
-      ORDER BY created_at DESC
-      LIMIT 30
-    `);
-
-    const boardPatterns = await query(`
-      SELECT action_type, context, result, created_at
-      FROM action_logs
-      WHERE action_type LIKE '%board%'
-         OR action_type LIKE '%register%'
-         OR action_type LIKE '%payment%'
-      ORDER BY created_at DESC
-      LIMIT 20
-    `).catch(() => ({ rows: [] }));
+    const [knowledge, recentEdits, recentHistory, boardPatterns] = await Promise.all([
+      readKnowledge(),
+      query(`
+        SELECT before_text, after_text, edited_at
+        FROM board_edits
+        ORDER BY edited_at DESC
+        LIMIT 20
+      `),
+      query(`
+        SELECT text, is_admin, created_at
+        FROM messages
+        ORDER BY created_at DESC
+        LIMIT 30
+      `),
+      query(`
+        SELECT action_type, context, result, created_at
+        FROM action_logs
+        WHERE action_type LIKE '%board%'
+           OR action_type LIKE '%register%'
+           OR action_type LIKE '%payment%'
+        ORDER BY created_at DESC
+        LIMIT 20
+      `).catch(() => ({ rows: [] })),
+    ]);
 
     return {
       knowledge: {
@@ -118,7 +66,7 @@ async function buildBoardContext() {
 // 🎓 LEARN FROM ADMIN ACTION — ዋናው learning function
 // ============================================================
 export async function learnBoardAction(actionType, details) {
-  const apiKey = getApiKey();
+  const apiKey = getLearningDeepSeekKey();
   if (!apiKey) return;
 
   try {
@@ -153,7 +101,12 @@ Details: ${JSON.stringify(details, null, 2)}
 }
 `;
 
-    const learned = await askDeepSeek(systemPrompt, userPrompt, apiKey);
+    const learned = await callDeepSeekAPI(systemPrompt, userPrompt, apiKey, {
+      model: DEEPSEEK_MODEL,
+      maxTokens: 1500,
+      retries: 3,
+    });
+
     if (!learned) return;
 
     const knowledge = await readKnowledge();
@@ -189,6 +142,7 @@ Details: ${JSON.stringify(details, null, 2)}
     });
 
     console.log(`[BoardLearning] ✅ Learned: ${actionType}`);
+    rotateResponseDeepSeekKey();
     return learned;
 
   } catch (err) {
@@ -200,14 +154,16 @@ Details: ${JSON.stringify(details, null, 2)}
 // 💬 PRIVATE TEACHING — Admin private chat ውስጥ ያስተምራል
 // ============================================================
 export async function handlePrivateBoardTeaching(adminId, text) {
-  const apiKey = getApiKey();
+  const apiKey = getLearningDeepSeekKey();
   if (!apiKey) return '❌ API key የለም';
 
   try {
-    const knowledge = await readKnowledge();
-    if (!knowledge.privateRules) knowledge.privateRules = [];
+    const [knowledge, context] = await Promise.all([
+      readKnowledge(),
+      buildBoardContext(),
+    ]);
 
-    const context = await buildBoardContext();
+    if (!knowledge.privateRules) knowledge.privateRules = [];
 
     const systemPrompt = `
 አንተ lottery bot AI ነህ። Admin private chat ውስጥ board rules እያስተማረህ ነው።
@@ -240,7 +196,7 @@ Admin ምን ማድረግ ፈልጓል? JSON ስጥ:
 }
 `;
 
-    const result = await askDeepSeek(systemPrompt, userPrompt, apiKey);
+    const result = await callDeepSeekAPI(systemPrompt, userPrompt, apiKey, { retries: 2 });
     if (!result) return '❌ ልረዳ አልቻልኩም። እንደገና ሞክር።';
 
     // ── ADD RULE ──
@@ -261,9 +217,6 @@ Admin ምን ማድረግ ፈልጓል? JSON ስጥ:
 
     // ── DELETE RULE ──
     if (result.intent === 'delete_rule') {
-      const before = knowledge.privateRules.length;
-
-      // ቁጥር ከሆነ index ይጠቀም
       const numMatch = text.match(/\d+/);
       if (numMatch) {
         const idx = parseInt(numMatch[0]) - 1;
@@ -280,7 +233,6 @@ Admin ምን ማድረግ ፈልጓል? JSON ስጥ:
         }
       }
 
-      // Text ከሆነ match ይፈልግ
       if (result.deleteTarget) {
         const idx = knowledge.privateRules.findIndex(r =>
           r.rule?.toLowerCase().includes(result.deleteTarget.toLowerCase())
@@ -366,7 +318,7 @@ export async function onBoardCreated(messageId, chatId, boardText, adminId) {
 // ✏️ BOARD EDITED — Admin board edit አደረገ
 // ============================================================
 export async function onBoardEdited(messageId, beforeText, afterText, adminId) {
-  const apiKey = getApiKey();
+  const apiKey = getLearningDeepSeekKey();
   if (!apiKey) return;
 
   try {
@@ -399,7 +351,7 @@ ${JSON.stringify(context.recentHistory?.slice(0, 10), null, 2)}
 }
 `;
 
-    const learned = await askDeepSeek(systemPrompt, userPrompt, apiKey);
+    const learned = await callDeepSeekAPI(systemPrompt, userPrompt, apiKey, { retries: 2 });
 
     await learnBoardAction(`board_edited_${learned?.editType || 'unknown'}`, {
       messageId,
@@ -453,7 +405,7 @@ export async function onAdminReply(userMessage, adminReply, username, action) {
 // 🤖 BOT DECISION — Bot ምን ማድረግ አለበት?
 // ============================================================
 export async function decideBoardAction(userMessage, username, currentBoardText) {
-  const apiKey = getApiKey();
+  const apiKey = getLearningDeepSeekKey();
   if (!apiKey) return null;
 
   try {
@@ -496,7 +448,7 @@ Message: "${userMessage}"
 }
 `;
 
-    const decision = await askDeepSeek(systemPrompt, userPrompt, apiKey);
+    const decision = await callDeepSeekAPI(systemPrompt, userPrompt, apiKey, { retries: 2 });
 
     if (decision) {
       learningEvents.emit('activity', {
@@ -505,6 +457,7 @@ Message: "${userMessage}"
       });
     }
 
+    rotateResponseDeepSeekKey();
     return decision;
 
   } catch (err) {
@@ -517,7 +470,7 @@ Message: "${userMessage}"
 // 🌙 NIGHTLY BOARD REVIEW — ሌሊት ሁሉንም ይገምግም
 // ============================================================
 export async function nightlyBoardReview() {
-  const apiKey = getApiKey();
+  const apiKey = getLearningDeepSeekKey();
   if (!apiKey) return;
 
   try {
@@ -552,7 +505,7 @@ ${JSON.stringify(context.knowledge.boardPatterns?.slice(-30), null, 2)}
 }
 `;
 
-    const review = await askDeepSeek(systemPrompt, userPrompt, apiKey);
+    const review = await callDeepSeekAPI(systemPrompt, userPrompt, apiKey, { retries: 1 });
     if (!review) return;
 
     await updateKnowledge({
@@ -566,6 +519,7 @@ ${JSON.stringify(context.knowledge.boardPatterns?.slice(-30), null, 2)}
     });
 
     console.log('[BoardLearning] 🌙 Nightly review complete');
+    rotateResponseDeepSeekKey();
     return review;
 
   } catch (err) {
