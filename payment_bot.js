@@ -310,29 +310,34 @@ Rules:
   }
 }
 
-// ===== GROQ — LOTTERY PHOTO ANALYZER =====
+// ===== GROQ — LOTTERY PHOTO ANALYZER ✅ ተስተካክሏል =====
 async function analyzeLotteryPhoto(imageBase64) {
-  const prompt = `You are a lottery ticket analyzer. Look at this image carefully.
+  const prompt = `You are a lottery ticket analyzer for Ethiopian lottery.
 
-The image contains lottery tickets stacked vertically.
-- TOP ticket = 1ኛ ዕጣ (first prize)
-- MIDDLE ticket = 2ኛ ዕጣ (second prize)
-- BOTTOM ticket = 3ኛ ዕጣ (third prize)
+A REAL Ethiopian lottery ticket:
+- Small physical cube or block shaped paper tickets
+- Printed with Amharic series label (e.g. ቢኤ, ብሀ, ቢሀ, ቢሉ)
+- 3 cubes/blocks stacked vertically — TOP=1st prize, MIDDLE=2nd prize, BOTTOM=3rd prize
+- Physical paper/cardboard material, photographed on a surface or held in hand
+- Contains only a short Amharic label and a number (e.g. "ቢኤ 75")
+
+NOT a lottery ticket → MUST return type "other":
+- CBE bank SMS or notification (contains words like "Credited", "ETB", "Ref No", "Account", "Balance")
+- Telebirr payment screenshot (contains "received ETB", "transaction")
+- Any phone screen or digital content
+- Any bank receipt, document, or paper with long text
+- Screenshots of any kind
+
+IMPORTANT: If the image shows a phone screen or contains bank/payment text → type MUST be "other"
 
 Respond ONLY in this exact JSON format (no markdown, no extra text):
 {
   "type": "lottery" | "other",
-  "series": "the Amharic/text label on the tickets or null",
-  "first": "top ticket number or null",
-  "second": "middle ticket number or null",
-  "third": "bottom ticket number or null"
-}
-
-Rules:
-- type "lottery" = image contains lottery tickets
-- series = the label printed on all tickets (e.g. ቢኤ, ብሀ, etc.)
-- first/second/third = the number on each ticket
-- If not lottery tickets, set all fields to null`;
+  "series": "Amharic label on the tickets or null",
+  "first": "top cube number or null",
+  "second": "middle cube number or null",
+  "third": "bottom cube number or null"
+}`;
 
   const response = await groq.chat.completions.create({
     model: 'meta-llama/llama-4-scout-17b-16e-instruct',
