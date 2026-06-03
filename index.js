@@ -530,6 +530,15 @@ try {
       if (boardMsg?.message_id) {
         const beforeText = boardMsg.text || '';
         const decision = await decideBoardAction(text, username, beforeText);
+
+if (!decision) {
+  await bot.sendMessage(chatId, '❌ አሁን ለጊዜው አልተሳካም። እንደገና ሞክር።', {
+    reply_to_message_id: msg.message_id,
+  });
+  await alertAdmin(bot, `⚠️ Board edit failed — NVIDIA connection error\nUser: @${username}\nMessage: "${text}"`, 'WARNING');
+  return;
+}
+
 const newEntry = decision?.boardEdit?.newEntry;
 
 const newLines = beforeText.split('\n').map(line =>
@@ -549,15 +558,14 @@ const newBoardText = newLines.join('\n');
 
           setImmediate(() => {
             learnAction(
-              'auto_register_slot',
-              text,
-              `Bot auto-registered @${username} to slot ${result.slotNumber}`,
-              {
-                username,
-                slotNumber: result.slotNumber,
-                userMessage: text,
-                boardBefore: beforeText.slice(0, 200),
-              }
+  'auto_register_slot',
+  text,
+  `Bot auto-edited board`,
+  {
+    userMessage: text,
+    boardBefore: beforeText.slice(0, 200),
+    aiDecision: decision?.boardEdit || {},
+  }
             ).catch(() => {});
           });
 
