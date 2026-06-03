@@ -5,7 +5,8 @@ const { Pool } = pg;
 function loadPools() {
   const pools = [];
   let i = 1;
-  while (process.env[`NEON_DB_${i}`] && i <= 10) {
+  // ensure bounds checked first to avoid unnecessary env lookups and preserve ordering
+  while (i <= 10 && process.env[`NEON_DB_${i}`]) {
     pools.push(new Pool({
       connectionString: process.env[`NEON_DB_${i}`],
       ssl: true,
@@ -259,15 +260,40 @@ export async function updateKnowledge(updates) {
   return merged;
 }
 
-function deepMergeArrays(target, source) {
+function isPlainObject(v) {
+  return v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function deepMergeArrays(target = {}, source = {}) {
   const result = { ...target };
   for (const key of Object.keys(source)) {
-    if (Array.isArray(source[key]) && Array.isArray(target[key])) {
-      result[key] = [...new Set([...target[key], ...source[key]])];
-    } else if (typeof source[key] === 'object' && source[key] !== null) {
-      result[key] = deepMergeArrays(target[key] || {}, source[key]);
+    const sVal = source[key];
+    const tVal = target[key];
+
+    if (Array.isArray(sVal) && Array.isArray(tVal)) {
+      // both arrays: try to dedupe
+      const bothPrimitive = sVal.every(v => (v === null || typeof v !== 'object')) && tVal.every(v => (v === null || typeof v !== 'object'));
+      if (bothPrimitive) {
+        result[key] = Array.from(new Set([...(tVal || []), ...sVal]));
+      } else {
+        // arrays of objects -> dedupe by JSON representation (stable enough for small arrays)
+        const map = new Map();
+        for (const item of [...(tVal || []), ...sVal]) {
+          try {
+            const k = (item && typeof item === 'object') ? JSON.stringify(item) : String(item);
+            if (!map.has(k)) map.set(k, item);
+          } catch (e) {
+            // fallback for circular objects
+            const k = String(item);
+            if (!map.has(k)) map.set(k, item);
+          }
+        }
+        result[key] = Array.from(map.values());
+      }
+    } else if (isPlainObject(sVal) && isPlainObject(tVal)) {
+      result[key] = deepMergeArrays(tVal, sVal);
     } else {
-      result[key] = source[key];
+      result[key] = sVal;
     }
   }
   return result;
@@ -567,8 +593,7 @@ export async function saveLotteryLiveEvent({ telegramId, isLive, triggeredAt }) 
   console.log(`[DB] Live event saved ✅`);
 }
 
-// ===== BOT STATE =====
-export async function getBotState() {
+// ===== BOT STATE =====nexport async function getBotState() {
   const res = await query(`SELECT is_on FROM bot_state WHERE id = 1`);
   return res.rows[0]?.is_on || false;
 }
@@ -579,8 +604,7 @@ export async function setBotState(isOn, adminId) {
   `, [isOn, adminId]);
 }
 
-// ===== TOKEN USAGE =====
-export async function addTokenUsage(service, inputTokens, outputTokens) {
+// ===== TOKEN USAGE =====nexport async function addTokenUsage(service, inputTokens, outputTokens) {
   const res = await query(`
     UPDATE token_usage
     SET input_tokens = input_tokens + $1,
@@ -617,8 +641,7 @@ export async function resetTokenUsage() {
   await query(`UPDATE token_usage SET input_tokens=0, output_tokens=0, calls=0, updated_at=NOW()`);
 }
 
-// ===== CLEANUP =====
-export async function cleanupOldData() {
+// ===== CLEANUP =====nexport async function cleanupOldData() {
   const results = {};
 
   const h = await query(`DELETE FROM history WHERE created_at < NOW() - INTERVAL '5 days'`);
@@ -643,8 +666,7 @@ export async function cleanupOldData() {
   return results;
 }
 
-// ===== PAYMENT =====
-
+// ===== PAYMENT =====n
 // ── SMS ref already used check ──
 export async function getSmsPaymentByRef(refNo) {
   const res = await query(`
@@ -703,8 +725,7 @@ export async function saveScreenshotPayment(telegramId, refNo, type, description
   return matchResult;
 }
 
-// ===== FUZZY REF MATCH =====
-function fuzzyRefMatch(ref1, ref2) {
+// ===== FUZZY REF MATCH =====nfunction fuzzyRefMatch(ref1, ref2) {
   if (!ref1 || !ref2) return false;
   if (ref1 === ref2) return true;
 
