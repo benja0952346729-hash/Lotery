@@ -10,6 +10,7 @@ import {
   saveLotteryResult,
   saveLotteryLiveEvent,
   cleanupLotteryResults,
+  getSmsPaymentByRef,
 } from './database.js';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -33,12 +34,19 @@ export async function handleSmsWebhook(rawSms) {
     return { success: false, reason: 'no_ref' };
   }
 
+  // ── Used REF check — ዳግም አይስራ ──
+  const existing = await getSmsPaymentByRef(refNo);
+  if (existing) {
+    console.log(`[SMS] Ref ${refNo} already used — skipping`);
+    return { success: false, reason: 'ref_already_used', refNo };
+  }
+
   const result = await saveSmsPayment(refNo, amount, type, rawSms);
 
   return { success: true, matched: result.matched || null, ...parsed };
 }
 
-// ===== PAYMENT PHOTO HANDLER — index.js ከ bot.on('message') ይጠራዋል =====
+// ===== PAYMENT PHOTO HANDLER =====
 export async function handlePaymentPhoto(bot, msg) {
   const chatId = msg.chat.id;
   const telegramId = msg.from.id;
@@ -126,13 +134,11 @@ export async function handleLotteryPhoto(bot, msg) {
     console.log(`[Lottery] Analysis:`, result);
 
     if (result.type !== 'lottery') {
-      // ሎተሪ ካልሆነ — payment screenshot ሊሆን ይችላል
       console.log(`[Lottery] Not a lottery ticket — passing to payment handler`);
       await handlePaymentPhoto(bot, msg);
       return;
     }
 
-    // DB ላይ ያስቀምጣል
     await saveLotteryResult({
       telegramId,
       series: result.series,
@@ -171,7 +177,6 @@ export async function handleLotterySticker(bot, msg) {
   console.log(`[Lottery] 🔴 Live sticker from ${telegramId}`);
 
   try {
-    // DB ላይ live event ያስቀምጣል
     await saveLotteryLiveEvent({
       telegramId,
       isLive: true,
@@ -206,7 +211,7 @@ async function parseSms(sms) {
 
   // 2️⃣ CBE Transfer SMS — Ref URL ውስጥ ነው
   const cbeTransfer = sms.match(
-    /transferred ETB ([\d,]+\.?\d*).+(https:\/\/\S+)/s
+    /transferred ETB ([\d,]+\.?\d*).+(https:\/\/Mbreciept\S+)/si
   );
   if (cbeTransfer) {
     const amount = parseFloat(cbeTransfer[1].replace(',', ''));
@@ -216,18 +221,31 @@ async function parseSms(sms) {
     return { type: 'CBE', amount, refNo };
   }
 
-  // 3️⃣ Telebirr SMS — transaction number ቀጥታ አለ
-  const telebirr = sms.match(
-    /received ETB ([\d,]+\.?\d*).+?transaction number is\s+([A-Z0-9]+)/s
+  // 3️⃣ Telebirr to CBE — bank transaction number
+  const telebirrToCbe = sms.match(
+    /transferred ETB ([\d,]+\.?\d*).+?bank transaction number is\s+([A-Z0-9]+)/s
   );
-  if (telebirr) {
+  if (telebirrToCbe) {
     return {
       type: 'Telebirr',
-      amount: parseFloat(telebirr[1].replace(',', '')),
-      refNo: telebirr[2],
+      amount: parseFloat(telebirrToCbe[1].replace(',', '')),
+      refNo: telebirrToCbe[2],
     };
   }
 
+  // 4️⃣ Telebirr Received — transaction number ቀጥታ አለ
+  const telebirrReceived = sms.match(
+    /received ETB ([\d,]+\.?\d*).+?transaction number is\s+([A-Z0-9]+)/s
+  );
+  if (telebirrReceived) {
+    return {
+      type: 'Telebirr',
+      amount: parseFloat(telebirrReceived[1].replace(',', '')),
+      refNo: telebirrReceived[2],
+    };
+  }
+
+  // REF ከሌለ → null ይመልስ → ignore ይሆናል
   return null;
 }
 
@@ -266,7 +284,7 @@ async function fetchRefFromUrl(url) {
   }
 }
 
-// ===== GROQ — በአማርኛ ምስሉን ያብራራል (llama-3.3-70b) =====
+// ===== GROQ — በአማርኛ ምስሉን ያብራራል =====
 async function describePhotoInAmharic(description) {
   const response = await groq.chat.completions.create({
     model: 'llama-3.3-70b-versatile',
@@ -327,7 +345,7 @@ Rules:
   }
 }
 
-// ===== GROQ — LOTTERY PHOTO ANALYZER ✅ ተስተካክሏል =====
+// ===== GROQ — LOTTERY PHOTO ANALYZER =====
 async function analyzeLotteryPhoto(imageBase64) {
   const prompt = `You are a lottery ticket analyzer for Ethiopian lottery.
 
@@ -419,7 +437,6 @@ setInterval(async () => {
   const result = await cleanupPayments();
   console.log('[Payment] Cleanup result:', result);
 
-  // Lottery — 2 ቀን አሮጌ records ሰርዝ
   const lotteryClean = await cleanupLotteryResults();
   console.log('[Lottery] Cleanup result:', lotteryClean);
 }, 1000 * 60 * 60 * 6);
