@@ -82,6 +82,30 @@ export async function initDB() {
     )
   `);
 
+  // ── Lottery Results ── ✅ አዲስ
+  await query(`
+    CREATE TABLE IF NOT EXISTS lottery_results (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT,
+      series TEXT,
+      first TEXT,
+      second TEXT,
+      third TEXT,
+      status TEXT DEFAULT 'ውጤት ታወጀ',
+      announced_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  // ── Lottery Live Events ── ✅ አዲስ
+  await query(`
+    CREATE TABLE IF NOT EXISTS lottery_live_events (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT,
+      is_live BOOLEAN DEFAULT TRUE,
+      triggered_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
   // ── Bot State ──
   await query(`
     CREATE TABLE IF NOT EXISTS bot_state (
@@ -516,6 +540,45 @@ export async function removeMember(number) {
 
 export async function clearLottery() {
   await query(`DELETE FROM lottery`);
+}
+
+// ===== LOTTERY RESULTS ✅ አዲስ =====
+export async function saveLotteryResult({ telegramId, series, first, second, third, announcedAt, status }) {
+  console.log(`[DB] saveLotteryResult — Series: ${series} | 1ኛ: ${first} | 2ኛ: ${second} | 3ኛ: ${third}`);
+  await query(`
+    INSERT INTO lottery_results (telegram_id, series, first, second, third, status, announced_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+  `, [telegramId, series, first, second, third, status || 'ውጤት ታወጀ', announcedAt || new Date().toISOString()]);
+  console.log(`[DB] Lottery result saved ✅`);
+}
+
+export async function getLotteryResults(limit = 20) {
+  const res = await query(`
+    SELECT * FROM lottery_results ORDER BY announced_at DESC LIMIT $1
+  `, [limit]);
+  return res.rows;
+}
+
+export async function cleanupLotteryResults() {
+  console.log('[DB] cleanupLotteryResults running...');
+  const results = await query(`
+    DELETE FROM lottery_results WHERE announced_at < NOW() - INTERVAL '2 days'
+  `);
+  const events = await query(`
+    DELETE FROM lottery_live_events WHERE triggered_at < NOW() - INTERVAL '2 days'
+  `);
+  console.log(`[DB] Lottery cleanup done — Results: ${results.rowCount} | Live Events: ${events.rowCount}`);
+  return { results: results.rowCount, events: events.rowCount };
+}
+
+// ===== LOTTERY LIVE EVENTS ✅ አዲስ =====
+export async function saveLotteryLiveEvent({ telegramId, isLive, triggeredAt }) {
+  console.log(`[DB] saveLotteryLiveEvent — TelegramID: ${telegramId} | isLive: ${isLive}`);
+  await query(`
+    INSERT INTO lottery_live_events (telegram_id, is_live, triggered_at)
+    VALUES ($1, $2, $3)
+  `, [telegramId, isLive, triggeredAt || new Date().toISOString()]);
+  console.log(`[DB] Live event saved ✅`);
 }
 
 // ===== BOT STATE =====
