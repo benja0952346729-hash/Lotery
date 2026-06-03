@@ -593,7 +593,8 @@ export async function saveLotteryLiveEvent({ telegramId, isLive, triggeredAt }) 
   console.log(`[DB] Live event saved ✅`);
 }
 
-// ===== BOT STATE =====nexport async function getBotState() {
+// ===== BOT STATE =====
+export async function getBotState() {
   const res = await query(`SELECT is_on FROM bot_state WHERE id = 1`);
   return res.rows[0]?.is_on || false;
 }
@@ -604,7 +605,8 @@ export async function setBotState(isOn, adminId) {
   `, [isOn, adminId]);
 }
 
-// ===== TOKEN USAGE =====nexport async function addTokenUsage(service, inputTokens, outputTokens) {
+// ===== TOKEN USAGE =====
+export async function addTokenUsage(service, inputTokens, outputTokens) {
   const res = await query(`
     UPDATE token_usage
     SET input_tokens = input_tokens + $1,
@@ -641,7 +643,8 @@ export async function resetTokenUsage() {
   await query(`UPDATE token_usage SET input_tokens=0, output_tokens=0, calls=0, updated_at=NOW()`);
 }
 
-// ===== CLEANUP =====nexport async function cleanupOldData() {
+// ===== CLEANUP =====
+export async function cleanupOldData() {
   const results = {};
 
   const h = await query(`DELETE FROM history WHERE created_at < NOW() - INTERVAL '5 days'`);
@@ -666,7 +669,7 @@ export async function resetTokenUsage() {
   return results;
 }
 
-// ===== PAYMENT =====n
+// ===== PAYMENT =====
 // ── SMS ref already used check ──
 export async function getSmsPaymentByRef(refNo) {
   const res = await query(`
@@ -725,7 +728,8 @@ export async function saveScreenshotPayment(telegramId, refNo, type, description
   return matchResult;
 }
 
-// ===== FUZZY REF MATCH =====nfunction fuzzyRefMatch(ref1, ref2) {
+// ===== FUZZY REF MATCH =====
+function fuzzyRefMatch(ref1, ref2) {{
   if (!ref1 || !ref2) return false;
   if (ref1 === ref2) return true;
 
