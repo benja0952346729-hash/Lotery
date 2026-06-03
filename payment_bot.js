@@ -214,8 +214,8 @@ async function parseSms(sms) {
 
   // 2️⃣ CBE Transfer SMS — Ref URL ውስጥ ነው
   const cbeTransfer = sms.match(
-  /(?:received|transferred) ETB ([\d,]+\.?\d*).+(https:\/\/Mbreciept\S+)/si
-);
+    /(?:received|transferred) ETB ([\d,]+\.?\d*).+(https:\/\/Mbreciept\S+)/si
+  );
   if (cbeTransfer) {
     const amount = parseFloat(cbeTransfer[1].replace(',', ''));
     const receiptUrl = cbeTransfer[2].trim();
@@ -252,44 +252,129 @@ async function parseSms(sms) {
   return null;
 }
 
-// ===== CBE RECEIPT URL — Ref ያወጣል =====
+// ===== CBE RECEIPT URL — Ref ያወጣል (FIXED) =====
 async function fetchRefFromUrl(url) {
   try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Android 13; Mobile)',
-        'Accept': 'text/html',
-      },
-      timeout: 15000,
-    });
+    const token = url.split('/').pop();
+    console.log('[RefFetch] Token:', token);
 
-    console.log('[RefFetch] Page status:', res.status);
-    const html = await res.text();
-    console.log('[RefFetch] HTML snippet:', html.slice(0, 500));
-
-    // CBE receipt ውስጥ "Ref No", "Reference No", "VAT Receipt No" ይፈልጋል
-    const patterns = [
-      /Ref(?:erence)?\s*No[:\s]+([A-Z0-9]+)/i,
-      /VAT\s*Receipt\s*No[:\s]+([A-Z0-9]+)/i,
-      /Transaction\s*(?:Ref|ID|No)[:\s]+([A-Z0-9]+)/i,
+    // CBE React app የሚጠቀማቸው possible API endpoints
+    const endpoints = [
+      `https://Mbreciept.cbe.com.et/api/receipts/${token}`,
+      `https://Mbreciept.cbe.com.et/api/receipt/${token}`,
+      `https://Mbreciept.cbe.com.et/api/transaction/${token}`,
+      `https://Mbreciept.cbe.com.et/api/v1/receipt/${token}`,
+      `https://Mbreciept.cbe.com.et/api/v1/receipts/${token}`,
+      `https://Mbreciept.cbe.com.et/api/v1/transaction/${token}`,
     ];
 
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match) {
-        console.log('[RefFetch] Found ref:', match[1]);
-        return match[1];
+    for (const endpoint of endpoints) {
+      try {
+        const res = await fetch(endpoint, {
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Android 13; Mobile)',
+          },
+          timeout: 10000,
+        });
+
+        console.log(`[RefFetch] ${endpoint} → ${res.status}`);
+
+        if (res.ok) {
+          const data = await res.json();
+          console.log('[RefFetch] Response data:', JSON.stringify(data).slice(0, 300));
+
+          // ሁሉም possible field names
+          const ref =
+            data?.vatReceiptNo ||
+            data?.refNo ||
+            data?.referenceNo ||
+            data?.reference ||
+            data?.transactionRef ||
+            data?.transactionId ||
+            data?.receiptNo ||
+            data?.data?.vatReceiptNo ||
+            data?.data?.refNo ||
+            data?.data?.referenceNo ||
+            data?.receipt?.refNo ||
+            data?.receipt?.vatReceiptNo;
+
+          if (ref) {
+            console.log('[RefFetch] ✅ Found ref:', ref);
+            return ref;
+          }
+
+          // nested object ውስጥ ref ፈልግ
+          const refFromNested = findRefInObject(data);
+          if (refFromNested) {
+            console.log('[RefFetch] ✅ Found nested ref:', refFromNested);
+            return refFromNested;
+          }
+        }
+      } catch (e) {
+        console.log(`[RefFetch] Endpoint failed: ${endpoint} →`, e.message);
       }
     }
 
-    console.log('[RefFetch] Ref not found in HTML');
+    // ── Fallback: JS bundle ውስጥ inline data ፈልግ ──
+    console.log('[RefFetch] All API endpoints failed — trying JS bundle scan');
+    const pageRes = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 15000,
+    });
+    const html = await pageRes.text();
+
+    // JS file paths ፈልግ
+    const scriptMatches = html.match(/src="([^"]+\.js[^"]*)"/g) || [];
+    for (const scriptTag of scriptMatches.slice(0, 3)) {
+      const scriptPath = scriptTag.replace(/src="|"/g, '');
+      const scriptUrl = scriptPath.startsWith('http')
+        ? scriptPath
+        : `https://Mbreciept.cbe.com.et${scriptPath}`;
+
+      try {
+        const scriptRes = await fetch(scriptUrl, { timeout: 10000 });
+        const scriptText = await scriptRes.text();
+
+        // API endpoint pattern ፈልግ
+        const apiMatch = scriptText.match(/["'`](\/api\/[^"'`\s]{3,50})["'`]/);
+        if (apiMatch) {
+          console.log('[RefFetch] Found API path in JS bundle:', apiMatch[1]);
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    console.log('[RefFetch] ❌ Could not find ref from any source');
     return null;
 
   } catch (err) {
-    console.error('[RefFetch] Failed:', err.message);
+    console.error('[RefFetch] Fatal error:', err.message);
     return null;
   }
 }
+
+// ===== HELPER — nested object ውስጥ ref ያወጣል =====
+function findRefInObject(obj, depth = 0) {
+  if (depth > 4 || !obj || typeof obj !== 'object') return null;
+
+  const refKeys = ['vatReceiptNo', 'refNo', 'referenceNo', 'reference',
+                   'transactionRef', 'transactionId', 'receiptNo', 'ref'];
+
+  for (const key of Object.keys(obj)) {
+    if (refKeys.includes(key) && typeof obj[key] === 'string' && obj[key].length > 3) {
+      return obj[key];
+    }
+    if (typeof obj[key] === 'object') {
+      const found = findRefInObject(obj[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 // ===== GROQ — በአማርኛ ምስሉን ያብራራል =====
 async function describePhotoInAmharic(description) {
   const response = await groq.chat.completions.create({
