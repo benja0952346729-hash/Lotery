@@ -279,8 +279,11 @@ async function fetchRefFromUrl(url) {
         return match[1];
       }
 
-      console.log(`[RefFetch] Attempt ${attempt} — ref not found, retrying...`);
-      await new Promise(r => setTimeout(r, 2000 * attempt));
+      // API paths ፈልግ
+const apiMatch = html.match(/["'](\/[a-z][^"'\s]{3,50})["']/gi);
+console.log('[RefFetch] Found paths:', [...new Set(apiMatch)].slice(0, 15));
+console.log(`[RefFetch] Attempt ${attempt} — ref not found, retrying...`);
+await new Promise(r => setTimeout(r, 2000 * attempt));
 
     } catch (err) {
       if (attempt === 3) {
