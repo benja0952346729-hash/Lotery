@@ -278,8 +278,9 @@ async function fetchRefFromUrl(url) {
       return match[1];
     }
 
-    console.log('[RefFetch] Ref not found in page HTML');
-    return null;
+    console.log('[RefFetch] HTML sample:', html.slice(0, 500));
+console.log('[RefFetch] Ref not found in page HTML');
+return null;
 
   } catch (err) {
     console.error('[RefFetch] Failed:', err.message);
