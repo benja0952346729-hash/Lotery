@@ -252,152 +252,53 @@ async function parseSms(sms) {
   return null;
 }
 
-// ===== CBE RECEIPT URL — Ref ያወጣል (FIXED) =====
+// ===== CBE RECEIPT URL — Jina AI Reader (FIXED) =====
 async function fetchRefFromUrl(url) {
   try {
-    const token = url.split('/').pop();
-    console.log('[RefFetch] Token:', token);
+    console.log('[RefFetch] Using Jina AI reader for:', url);
 
-    // CBE React app የሚጠቀማቸው possible API endpoints
-    const endpoints = [
-      `https://Mbreciept.cbe.com.et/api/receipts/${token}`,
-      `https://Mbreciept.cbe.com.et/api/receipt/${token}`,
-      `https://Mbreciept.cbe.com.et/api/transaction/${token}`,
-      `https://Mbreciept.cbe.com.et/api/v1/receipt/${token}`,
-      `https://Mbreciept.cbe.com.et/api/v1/receipts/${token}`,
-      `https://Mbreciept.cbe.com.et/api/v1/transaction/${token}`,
+    const jinaUrl = `https://r.jina.ai/${url}`;
+    const res = await fetch(jinaUrl, {
+      headers: {
+        'Accept': 'text/plain',
+        'User-Agent': 'Mozilla/5.0',
+      },
+      timeout: 20000,
+    });
+
+    console.log('[RefFetch] Jina status:', res.status);
+
+    if (!res.ok) {
+      console.log('[RefFetch] Jina failed:', res.status);
+      return null;
+    }
+
+    const text = await res.text();
+    console.log('[RefFetch] Jina text snippet:', text.slice(0, 500));
+
+    // VAT Receipt No ወይም Reference No ፈልግ
+    const patterns = [
+      /VAT Receipt No[:\s]+([A-Z0-9]+)/i,
+      /Reference No\.\s*\(VAT Invoice No\)[:\s]+([A-Z0-9]+)/i,
+      /Reference No[:\s]+([A-Z0-9]+)/i,
+      /Ref No[:\s]+([A-Z0-9]+)/i,
     ];
 
-    for (const endpoint of endpoints) {
-      try {
-        const res = await fetch(endpoint, {
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Android 13; Mobile)',
-          },
-          timeout: 10000,
-        });
-
-        console.log(`[RefFetch] ${endpoint} → ${res.status}`);
-
-        if (res.ok) {
-          const data = await res.json();
-          console.log('[RefFetch] Response data:', JSON.stringify(data).slice(0, 300));
-
-          // ሁሉም possible field names
-          const ref =
-            data?.vatReceiptNo ||
-            data?.refNo ||
-            data?.referenceNo ||
-            data?.reference ||
-            data?.transactionRef ||
-            data?.transactionId ||
-            data?.receiptNo ||
-            data?.data?.vatReceiptNo ||
-            data?.data?.refNo ||
-            data?.data?.referenceNo ||
-            data?.receipt?.refNo ||
-            data?.receipt?.vatReceiptNo;
-
-          if (ref) {
-            console.log('[RefFetch] ✅ Found ref:', ref);
-            return ref;
-          }
-
-          // nested object ውስጥ ref ፈልግ
-          const refFromNested = findRefInObject(data);
-          if (refFromNested) {
-            console.log('[RefFetch] ✅ Found nested ref:', refFromNested);
-            return refFromNested;
-          }
-        }
-      } catch (e) {
-        console.log(`[RefFetch] Endpoint failed: ${endpoint} →`, e.message);
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) {
+        console.log('[RefFetch] ✅ Found ref:', match[1]);
+        return match[1];
       }
     }
 
-    // ── Fallback: JS bundle ውስጥ API path ፈልጎ ቀጥታ ጠራ ──
-    console.log('[RefFetch] All API endpoints failed — trying JS bundle scan');
-    const pageRes = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 15000,
-    });
-    const html = await pageRes.text();
-
-    const scriptMatches = html.match(/src="([^"]+\.js[^"]*)"/g) || [];
-    for (const scriptTag of scriptMatches.slice(0, 5)) {
-      const scriptPath = scriptTag.replace(/src="|"/g, '');
-      const scriptUrl = scriptPath.startsWith('http')
-        ? scriptPath
-        : `https://Mbreciept.cbe.com.et${scriptPath}`;
-
-      try {
-        const scriptRes = await fetch(scriptUrl, { timeout: 10000 });
-        const scriptText = await scriptRes.text();
-
-        // ሁሉም /api/ paths ፈልግ
-        const apiMatches = scriptText.match(/["'`](\/api\/[^"'`\s]{3,80})["'`]/g) || [];
-        for (const match of apiMatches) {
-          const apiPath = match.replace(/["'`]/g, '');
-          console.log('[RefFetch] Found API path in JS bundle:', apiPath);
-
-          // ── ያገኘውን endpoint ቀጥታ ጠራ ──
-          const fullEndpoint = `https://Mbreciept.cbe.com.et${apiPath}/${token}`;
-          try {
-            const apiRes = await fetch(fullEndpoint, {
-              headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0',
-              },
-              timeout: 10000,
-            });
-            console.log(`[RefFetch] JS-found endpoint → ${apiRes.status}: ${fullEndpoint}`);
-
-            if (apiRes.ok) {
-              const data = await apiRes.json();
-              console.log('[RefFetch] JS-found data:', JSON.stringify(data).slice(0, 300));
-              const ref = findRefInObject(data);
-              if (ref) {
-                console.log('[RefFetch] ✅ Found ref via JS bundle:', ref);
-                return ref;
-              }
-            }
-          } catch (e) {
-            console.log('[RefFetch] JS-found endpoint failed:', e.message);
-          }
-        }
-      } catch (e) {
-        // ignore script fetch errors
-      }
-    }
-
-    console.log('[RefFetch] ❌ Could not find ref from any source');
+    console.log('[RefFetch] ❌ Ref not found in Jina response');
     return null;
 
   } catch (err) {
     console.error('[RefFetch] Fatal error:', err.message);
     return null;
   }
-}
-
-// ===== HELPER — nested object ውስጥ ref ያወጣል =====
-function findRefInObject(obj, depth = 0) {
-  if (depth > 4 || !obj || typeof obj !== 'object') return null;
-
-  const refKeys = ['vatReceiptNo', 'refNo', 'referenceNo', 'reference',
-                   'transactionRef', 'transactionId', 'receiptNo', 'ref'];
-
-  for (const key of Object.keys(obj)) {
-    if (refKeys.includes(key) && typeof obj[key] === 'string' && obj[key].length > 3) {
-      return obj[key];
-    }
-    if (typeof obj[key] === 'object') {
-      const found = findRefInObject(obj[key], depth + 1);
-      if (found) return found;
-    }
-  }
-  return null;
 }
 
 // ===== GROQ — በአማርኛ ምስሉን ያብራራል =====
