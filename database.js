@@ -703,6 +703,55 @@ export async function saveScreenshotPayment(telegramId, refNo, type, description
   return matchResult;
 }
 
+// ===== FUZZY REF MATCH =====
+function fuzzyRefMatch(ref1, ref2) {
+  if (!ref1 || !ref2) return false;
+  if (ref1 === ref2) return true;
+
+  const r1 = ref1.toUpperCase();
+  const r2 = ref2.toUpperCase();
+
+  // Length ለየት ቢል reject
+  if (r1.length !== r2.length) return false;
+
+  // የሚምታቱ characters
+  const knownConfusions = [
+    ['5', 'S'],
+    ['0', 'O'],
+    ['1', 'I'],
+  ];
+
+  function isKnownConfusion(a, b) {
+    return knownConfusions.some(
+      ([x, y]) => (a === x && b === y) || (a === y && b === x)
+    );
+  }
+
+  let knownErrors = 0;
+  let unknownErrors = 0;
+
+  for (let i = 0; i < r1.length; i++) {
+    if (r1[i] === r2[i]) continue;
+
+    if (isKnownConfusion(r1[i], r2[i])) {
+      knownErrors++;
+    } else {
+      unknownErrors++;
+    }
+
+    // ህጎች:
+    // 1 known + 1 unknown → ❌
+    // 2 unknown → ❌
+    // 3+ ምንም → ❌
+    if (unknownErrors >= 1 && knownErrors >= 1) return false;
+    if (unknownErrors >= 2) return false;
+    if (knownErrors > 2) return false;
+    if (knownErrors + unknownErrors > 2) return false;
+  }
+
+  return true;
+}
+
 export async function tryMatch({ refNo, amount, type, telegramId }) {
   console.log(`[DB] tryMatch called — Ref: ${refNo} | TelegramID: ${telegramId || 'N/A'}`);
 
@@ -712,37 +761,40 @@ export async function tryMatch({ refNo, amount, type, telegramId }) {
   }
 
   const sms = await query(`
-    SELECT * FROM payment_sms WHERE ref_no = $1 AND matched = FALSE
-  `, [refNo]);
+    SELECT * FROM payment_sms WHERE matched = FALSE
+  `);
 
   const screenshot = await query(`
-    SELECT * FROM payment_screenshots WHERE ref_no = $1 AND matched = FALSE
-  `, [refNo]);
+    SELECT * FROM payment_screenshots WHERE matched = FALSE
+  `);
 
   console.log(`[DB] tryMatch — SMS rows: ${sms.rows.length} | Screenshot rows: ${screenshot.rows.length}`);
 
-  if (sms.rows.length > 0 && screenshot.rows.length > 0) {
-    const s = sms.rows[0];
-    const sc = screenshot.rows[0];
+  // Fuzzy match SMS vs Screenshot
+  for (const s of sms.rows) {
+    for (const sc of screenshot.rows) {
+      if (fuzzyRefMatch(s.ref_no, sc.ref_no)) {
+        console.log(`[DB] ✅ FUZZY MATCH FOUND! SMS Ref: ${s.ref_no} | Screenshot Ref: ${sc.ref_no} | TelegramID: ${sc.telegram_id}`);
 
-    console.log(`[DB] ✅ MATCH FOUND! Ref: ${refNo} | TelegramID: ${sc.telegram_id} | Amount: ${s.amount}`);
+        await query(`UPDATE payment_sms SET matched = TRUE WHERE id = $1`, [s.id]);
+        await query(`UPDATE payment_screenshots SET matched = TRUE WHERE id = $1`, [sc.id]);
 
-    await query(`UPDATE payment_sms SET matched = TRUE WHERE ref_no = $1`, [refNo]);
-    await query(`UPDATE payment_screenshots SET matched = TRUE WHERE ref_no = $1`, [refNo]);
+        console.log(`[DB] Both records marked as matched ✅`);
 
-    console.log(`[DB] Both records marked as matched ✅`);
-
-    return {
-      matched: {
-        telegramId: sc.telegram_id,
-        amount: s.amount,
-        type: s.type,
-        refNo,
+        return {
+          matched: {
+            telegramId: sc.telegram_id,
+            amount: s.amount,
+            type: s.type,
+            refNo: s.ref_no,
+            screenshotRef: sc.ref_no,
+          }
+        };
       }
-    };
+    }
   }
 
-  console.log(`[DB] No match yet — SMS: ${sms.rows.length > 0 ? '✅' : '❌'} | Screenshot: ${screenshot.rows.length > 0 ? '✅' : '❌'} | Ref: ${refNo}`);
+  console.log(`[DB] No match yet — Ref: ${refNo}`);
   return { matched: null };
 }
 
