@@ -254,44 +254,34 @@ async function parseSms(sms) {
 
 // ===== CBE RECEIPT URL — Ref ያወጣል =====
 async function fetchRefFromUrl(url) {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(url, {
-  headers: {
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Samsung Galaxy) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Cache-Control': 'max-age=0',
-  },
-  timeout: 15000,
-});
+  try {
+    const code = url.split('/').pop();
+    
+    // Token ጋር API ሞክር
+    const apiRes = await fetch(`https://Mbreciept.cbe.com.et/api/receipt`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${code}`,
+        'X-Token': code,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ token: code }),
+      timeout: 15000,
+    });
+    
+    console.log('[RefFetch] API status:', apiRes.status);
+    const data = await apiRes.text();
+    console.log('[RefFetch] API response:', data.slice(0, 300));
 
-      const html = await res.text();
-      const match = html.match(
-        /(?:VAT\s*Receipt\s*No|Reference\s*No)[^A-Z0-9]*([A-Z]{2}\d+[A-Z0-9]+)/i
-      );
-
-      if (match) {
-        console.log(`[RefFetch] Found ref: ${match[1]}`);
-        return match[1];
-      }
-
-      // API paths ፈልግ
-const apiMatch = html.match(/["'](\/[a-z][^"'\s]{3,50})["']/gi);
-console.log('[RefFetch] Found paths:', [...new Set(apiMatch)].slice(0, 15));
-console.log(`[RefFetch] Attempt ${attempt} — ref not found, retrying...`);
-await new Promise(r => setTimeout(r, 2000 * attempt));
-
-    } catch (err) {
-      if (attempt === 3) {
-        console.error('[RefFetch] Failed:', err.message);
-        return null;
-      }
-      await new Promise(r => setTimeout(r, 2000 * attempt));
+    const parsed = JSON.parse(data);
+    const ref = parsed?.vatReceiptNo || parsed?.refNo || parsed?.referenceNo || parsed?.reference;
+    if (ref) {
+      console.log('[RefFetch] Found ref:', ref);
+      return ref;
     }
+
+  } catch (err) {
+    console.error('[RefFetch] Failed:', err.message);
   }
   return null;
 }
