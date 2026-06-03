@@ -19,35 +19,40 @@ const DEEPSEEK_MODEL = 'deepseek-ai/deepseek-r1';
 
 // ── DeepSeek ጋር ይነጋገራል ──
 async function askDeepSeek(systemPrompt, userPrompt, apiKey) {
-  try {
-    const response = await fetch(NVIDIA_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: DEEPSEEK_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.2,
-        max_tokens: 1500,
-      }),
-    });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await fetch(NVIDIA_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: DEEPSEEK_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 1500,
+        }),
+      });
 
-    const data = await response.json();
-    const text = data.choices?.[0]?.message?.content || '';
+      const data = await response.json();
+      const text = data.choices?.[0]?.message?.content || '';
 
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+      return null;
+    } catch (err) {
+      if (attempt === 3) {
+        console.error('[BoardLearning] DeepSeek error:', err.message);
+        return null;
+      }
+      await new Promise(r => setTimeout(r, 1000 * attempt));
     }
-    return null;
-  } catch (err) {
-    console.error('[BoardLearning] DeepSeek error:', err.message);
-    return null;
   }
 }
 
@@ -483,7 +488,7 @@ Message: "${userMessage}"
   "shouldEditBoard": true/false,
   "boardEdit": {
     "slotNumber": "number",
-    "newEntry": "slot# username ⏳",
+    "newEntry": "the full updated line as admin would write it",
     "editType": "registration|payment|removal"
   },
   "confidence": 0.0-1.0,
