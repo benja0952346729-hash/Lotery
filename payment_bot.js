@@ -270,8 +270,8 @@ async function fetchRefFromUrl(url) {
 
     const html = await res.text();
     const match = html.match(
-      /(?:VAT\s*Receipt\s*No|Reference\s*No)[^A-Z0-9]*([A-Z]{2}\d{6,}[A-Z0-9]*)/i
-    );
+  /(?:VAT\s*Receipt\s*No|Reference\s*No)[^A-Z0-9]*([A-Z]{2}\d+[A-Z0-9]+)/i
+);
 
     if (match) {
       console.log(`[RefFetch] Found ref: ${match[1]}`);
