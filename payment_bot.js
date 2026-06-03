@@ -254,38 +254,38 @@ async function parseSms(sms) {
 
 // ===== CBE RECEIPT URL — Ref ያወጣል =====
 async function fetchRefFromUrl(url) {
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
-        'Accept': 'text/html,application/xhtml+xml',
-      },
-      timeout: 10000,
-    });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+          'Accept': 'text/html,application/xhtml+xml',
+        },
+        timeout: 10000,
+      });
 
-    if (!res.ok) {
-      console.error(`[RefFetch] HTTP ${res.status} for URL: ${url}`);
-      return null;
+      const html = await res.text();
+      const match = html.match(
+        /(?:VAT\s*Receipt\s*No|Reference\s*No)[^A-Z0-9]*([A-Z]{2}\d+[A-Z0-9]+)/i
+      );
+
+      if (match) {
+        console.log(`[RefFetch] Found ref: ${match[1]}`);
+        return match[1];
+      }
+
+      console.log(`[RefFetch] Attempt ${attempt} — ref not found, retrying...`);
+      await new Promise(r => setTimeout(r, 2000 * attempt));
+
+    } catch (err) {
+      if (attempt === 3) {
+        console.error('[RefFetch] Failed:', err.message);
+        return null;
+      }
+      await new Promise(r => setTimeout(r, 2000 * attempt));
     }
-
-    const html = await res.text();
-    const match = html.match(
-  /(?:VAT\s*Receipt\s*No|Reference\s*No)[^A-Z0-9]*([A-Z]{2}\d+[A-Z0-9]+)/i
-);
-
-    if (match) {
-      console.log(`[RefFetch] Found ref: ${match[1]}`);
-      return match[1];
-    }
-
-    console.log('[RefFetch] HTML sample:', html.slice(0, 500));
-console.log('[RefFetch] Ref not found in page HTML');
-return null;
-
-  } catch (err) {
-    console.error('[RefFetch] Failed:', err.message);
-    return null;
   }
+  return null;
 }
 
 // ===== GROQ — በአማርኛ ምስሉን ያብራራል =====
