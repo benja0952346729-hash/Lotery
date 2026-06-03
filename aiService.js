@@ -1,6 +1,11 @@
 import OpenAI from 'openai';
 import { EventEmitter } from 'events';
-import { getNextDeepSeekKey, rotateDeepSeekKey } from './keys.js';
+import { 
+  getResponseDeepSeekKey,
+  rotateResponseDeepSeekKey,
+  getLearningDeepSeekKey,
+  rotateLearningDeepSeekKey,
+} from './keys.js';
 import {
   readKnowledge, updateKnowledge, getHistory,
   getLotteryList, getTokenUsage, addTokenUsage,
@@ -70,12 +75,48 @@ export async function getTokenStats() {
 }
 
 // ─────────────────────────────────────────
-// NVIDIA / DeepSeek CALLER
+// RESPONSE CALLER — User facing (ፈጣን keys)
 // ─────────────────────────────────────────
-async function callDeepSeek(prompt, retries = 3) {
+async function callDeepSeekResponse(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
-      const key = getNextDeepSeekKey();
+      const key = getResponseDeepSeekKey();
+      const client = new OpenAI({
+        apiKey: key,
+        baseURL: 'https://integrate.api.nvidia.com/v1',
+      });
+      const completion = await client.chat.completions.create({
+        model: 'deepseek-ai/deepseek-v4-flash',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 512,
+        temperature: 0.7,
+      });
+      await trackTokens(
+        'nvidia-deepseek',
+        completion.usage?.prompt_tokens || 0,
+        completion.usage?.completion_tokens || 0
+      );
+      return completion.choices[0]?.message?.content || '';
+    } catch (err) {
+      if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
+        console.log('[NVIDIA Response] Rate limit — rotating key...');
+        rotateResponseDeepSeekKey();
+        await new Promise(res => setTimeout(res, 2000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('All response keys exhausted');
+}
+
+// ─────────────────────────────────────────
+// LEARNING CALLER — Background (learning keys)
+// ─────────────────────────────────────────
+async function callDeepSeekLearn(prompt, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const key = getLearningDeepSeekKey();
       const client = new OpenAI({
         apiKey: key,
         baseURL: 'https://integrate.api.nvidia.com/v1',
@@ -94,15 +135,32 @@ async function callDeepSeek(prompt, retries = 3) {
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
-        console.log('[NVIDIA] Rate limit — rotating key...');
-        rotateDeepSeekKey();
+        console.log('[NVIDIA Learn] Rate limit — rotating key...');
+        rotateLearningDeepSeekKey();
         await new Promise(res => setTimeout(res, 2000));
         continue;
       }
       throw err;
     }
   }
-  throw new Error('All NVIDIA keys exhausted');
+  throw new Error('All learning keys exhausted');
+}
+
+// ─────────────────────────────────────────
+// EXPORT — boardLearning.js ይጠቀምበታል
+// ─────────────────────────────────────────
+export async function callDeepSeekAPI(systemPrompt, userPrompt, apiKey, options = {}) {
+  const prompt = systemPrompt + '\n\n' + userPrompt;
+  const raw = await callDeepSeekLearn(prompt, options.retries || 3);
+  try {
+    return JSON.parse(raw.replace(/```json|```/g, '').trim());
+  } catch {
+    return null;
+  }
+}
+
+export async function callMultipleAPIsInParallel() {
+  return null;
 }
 
 // ─────────────────────────────────────────
@@ -111,7 +169,7 @@ async function callDeepSeek(prompt, retries = 3) {
 export async function testNvidiaConnection() {
   try {
     console.log('🔌 NVIDIA NIM እየተገናኘ...');
-    const key = getNextDeepSeekKey();
+    const key = getResponseDeepSeekKey();
     const client = new OpenAI({
       apiKey: key,
       baseURL: 'https://integrate.api.nvidia.com/v1',
@@ -179,7 +237,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -237,7 +295,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -283,7 +341,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -315,7 +373,6 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 export async function handleAdminCommand(adminMessage, currentBoardText = '') {
   const knowledge = await readKnowledge();
-  const actionLogs = await getActionLogs(0.7);
   const template = knowledge.boardTemplate || '';
 
   const prompt = `
@@ -353,7 +410,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekResponse(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -376,7 +433,6 @@ export async function decideBotAction(userMessage, username, currentBoardText) {
   const knowledge = await readKnowledge();
   const actionLogs = await getActionLogs(0.7);
   const edits = await getBoardEdits(20);
-  const deletions = await getDeletedMessages(10);
 
   const prompt = `
 You are an AI student learning to manage an Amharic Telegram lottery group.
@@ -416,7 +472,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekResponse(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -458,7 +514,7 @@ Return ONLY valid JSON:
   "rule": "rule to remember"
 }`;
 
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -504,7 +560,7 @@ Return ONLY valid JSON:
   "rule": "rule to remember if any, else null"
 }`;
 
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -574,7 +630,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     if (parsed.shouldUpdate) {
@@ -608,7 +664,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     if (parsed.isRule && parsed.rules.length > 0) {
@@ -631,7 +687,6 @@ Return ONLY valid JSON:
 async function deepSeekBackgroundLearn(userMessage, botResponse, context = '') {
   const knowledge = await readKnowledge();
   const bestPairs = await getBestQAPairs(15);
-  const actionLogs = await getActionLogs(0.7);
 
   const prompt = `
 You are a background learning AI student for an Amharic lottery Telegram bot.
@@ -662,7 +717,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -684,7 +739,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// SYSTEM PROMPT BUILDER — STUDENT MINDSET
+// SYSTEM PROMPT BUILDER
 // ─────────────────────────────────────────
 async function buildSystemPrompt(currentBoardText = '') {
   const knowledge = await readKnowledge();
@@ -844,7 +899,7 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
   "confidence": 0.9
 }`;
 
-  const raw = await callDeepSeek(intentPrompt);
+  const raw = await callDeepSeekResponse(intentPrompt);
 
   let parsed;
   try {
@@ -859,24 +914,11 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
     };
   }
 
-  setImmediate(() => {
+  // Background learning — 5 minutes delay
+  setTimeout(() => {
     deepSeekBackgroundLearn(userMessage, parsed.response, `User: ${username}, Intent: ${parsed.intent}`)
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
-  });
-
-  try {
-    const decidedAction = await decideBotAction(userMessage, username, currentBoardText);
-    if (decidedAction && decidedAction.confidence > (parsed.confidence || 0)) {
-      parsed.action = decidedAction.action;
-      parsed.slotNumber = decidedAction.slotNumber || parsed.slotNumber;
-      if (decidedAction.responseText) {
-        parsed.response = decidedAction.responseText;
-        parsed.confidence = decidedAction.confidence;
-      }
-    }
-  } catch (err) {
-    console.error('[DECIDE] Error:', err.message);
-  }
+  }, 5 * 60 * 1000);
 
   return {
     response: parsed.response,
@@ -906,15 +948,15 @@ export async function handleRegistration(userId, username, requestedNumber) {
   else situation = `Number ${requestedNumber} available for ${username}`;
 
   const fullPrompt = systemPrompt + `\n\nSituation: ${situation}. @${username} wants number ${requestedNumber}. Respond as admin in Amharic.`;
-  const response = await callDeepSeek(fullPrompt);
+  const response = await callDeepSeekResponse(fullPrompt);
 
-  setImmediate(() => {
+  setTimeout(() => {
     deepSeekBackgroundLearn(
       `ምዝገባ ቁጥር ${requestedNumber}`,
       response,
       situation
     ).catch(err => console.error('[BACKGROUND] Error:', err.message));
-  });
+  }, 5 * 60 * 1000);
 
   return {
     response,
@@ -929,12 +971,12 @@ export async function handleRegistration(userId, username, requestedNumber) {
 export async function generateAnnouncement(topic, details) {
   const systemPrompt = await buildSystemPrompt();
   const fullPrompt = systemPrompt + `\n\nWrite announcement about: ${topic}. ${details}. Admin Amharic style with emojis.`;
-  const response = await callDeepSeek(fullPrompt);
+  const response = await callDeepSeekResponse(fullPrompt);
 
-  setImmediate(() => {
+  setTimeout(() => {
     deepSeekBackgroundLearn(`announcement: ${topic}`, response, 'announcement')
       .catch(err => console.error('[BACKGROUND] Error:', err.message));
-  });
+  }, 5 * 60 * 1000);
 
   return response;
 }
@@ -947,7 +989,6 @@ export async function generateLearningSummary() {
   const history = await getHistory(5);
   const bestPairs = await getBestQAPairs(10);
   const edits = await getBoardEdits(20);
-  const deletions = await getDeletedMessages(10);
 
   const rulesCount = knowledge.rules?.length || 0;
   const intentsCount = knowledge.intents?.length || 0;
@@ -967,7 +1008,7 @@ Current data:
 Top rules learned:
 ${knowledge.rules?.slice(0, 10).map((r, i) => (i+1) + '. ' + r).join('\n') || 'None'}
 
-Calculate REAL confidence (DO NOT default to 0.75):
+Calculate REAL confidence:
 - 0-20%: 0-5 rules, 0-10 intents
 - 21-40%: 6-15 rules, 11-30 intents
 - 41-60%: 16-30 rules, 31-60 intents
@@ -980,12 +1021,12 @@ Return ONLY valid JSON:
   "summary": "brief summary in Amharic and English",
   "newThingsLearned": [],
   "weakAreas": [],
-  "confidence": <CALCULATE_FROM_DATA_ABOVE>,
+  "confidence": 0.0,
   "readyToReplace": false
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -1081,7 +1122,7 @@ async function processBatch() {
 You are a learning AI student for an Amharic Telegram lottery group.
 Analyze this batch of ${batch.length} messages from your teacher (admin) and users.
 
-ADMIN messages (your teacher) (${adminMessages.length}):
+ADMIN messages (${adminMessages.length}):
 ${adminMessages.map((m, i) => `${i + 1}. "${m}"`).join('\n') || 'None'}
 
 USER + BOT exchanges (${qaExchanges.length}):
@@ -1108,7 +1149,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -1174,9 +1215,6 @@ ${edits.slice(0, 20).map(e =>
   `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
 ).join('\n') || 'None'}
 
-Deletions studied today (${deletions.length}):
-${deletions.slice(0, 10).map(d => `- "${d.text?.slice(0, 40)}"`).join('\n') || 'None'}
-
 Current knowledge:
 - Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
 - Rules: ${knowledge.rules?.length || 0}
@@ -1202,7 +1240,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -1257,7 +1295,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const response = await callDeepSeek(prompt);
+    const response = await callDeepSeekLearn(prompt);
     const clean = response.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -1311,7 +1349,7 @@ export async function analyzePhoto(base64Image, caption = '', username = '', con
   const knowledge = await readKnowledge();
 
   try {
-    const key = getNextDeepSeekKey();
+    const key = getResponseDeepSeekKey();
     const client = new OpenAI({
       apiKey: key,
       baseURL: 'https://integrate.api.nvidia.com/v1',
@@ -1346,10 +1384,10 @@ Look at the photo carefully. DO NOT assume — analyze what you actually see.
 
 Return ONLY valid JSON:
 {
-  "photoType": "what type of photo this is (describe naturally)",
+  "photoType": "what type of photo this is",
   "extractedText": "any text visible in the photo",
-  "meaning": "what this photo means in context of this group",
-  "suggestedAction": "what the bot should do based on this photo",
+  "meaning": "what this photo means in context",
+  "suggestedAction": "what the bot should do",
   "keyDetails": {
     "amount": null,
     "name": null,
@@ -1359,7 +1397,7 @@ Return ONLY valid JSON:
   },
   "confidence": 0.8,
   "shouldLearn": true,
-  "ruleToLearn": "any rule to remember from this photo, or null"
+  "ruleToLearn": "any rule to remember, or null"
 }`,
             },
           ],
@@ -1384,13 +1422,13 @@ Return ONLY valid JSON:
     }
 
     if (parsed.meaning) {
-      setImmediate(() => {
+      setTimeout(() => {
         deepSeekBackgroundLearn(
           `[PHOTO] ${caption || parsed.photoType}`,
           parsed.meaning,
           `Photo from @${username}: ${parsed.extractedText?.slice(0, 100) || ''}`
         ).catch(() => {});
-      });
+      }, 5 * 60 * 1000);
     }
 
     learningEvents.emit('activity', {
@@ -1404,7 +1442,7 @@ Return ONLY valid JSON:
     console.error('[PHOTO] Vision error:', err.message);
 
     if (caption) {
-      const fallback = await callDeepSeek(`
+      const fallback = await callDeepSeekLearn(`
 You are an AI student in an Amharic lottery Telegram group.
 A photo was sent with caption: "${caption}" by @${username}
 What does this mean? What should the bot do?
@@ -1433,8 +1471,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// PRIVATE CHAT CONTEXT — Smart History
-// Last 20 messages + summary of older ones
+// PRIVATE CHAT CONTEXT
 // ─────────────────────────────────────────
 const privateChatHistories = new Map();
 const MAX_RECENT = 20;
@@ -1455,7 +1492,7 @@ async function addToPrivateHistory(userId, role, content) {
     const oldText = oldMessages.map(m => `${m.role}: "${m.content}"`).join('\n');
     try {
       const summaryPrompt = `Summarize this conversation briefly in Amharic (max 3 sentences):\n${oldText}\nReturn ONLY the summary text, no JSON.`;
-      const newSummary = await callDeepSeek(summaryPrompt);
+      const newSummary = await callDeepSeekLearn(summaryPrompt);
       history.summary = (history.summary ? history.summary + ' | ' : '') + newSummary.trim();
     } catch {
       history.summary = `${oldMessages.length} messages discussed earlier`;
@@ -1497,13 +1534,12 @@ BEHAVIOR:
 - ሁልጊዜ በአማርኛ ተናገር
 - ጥያቄ ስጠይቅ አንድ ብቻ ጠይቅ
 - ስህተት ሲነገርህ ወዲያው ተማር እና አረጋግጥ
-- የተማርከውን ነገር ሲጠየቅ ግልጽ አድርግ
 - አጭር እና ቀጥተኛ ሁን`;
 
   await addToPrivateHistory(userId, 'user', userMessage);
 
   try {
-    const key = getNextDeepSeekKey();
+    const key = getResponseDeepSeekKey();
     const client = new OpenAI({
       apiKey: key,
       baseURL: 'https://integrate.api.nvidia.com/v1',
@@ -1533,11 +1569,7 @@ BEHAVIOR:
     setImmediate(() => {
       learnFromMessage({ text: userMessage }, true).catch(() => {});
       learnLotteryRules(userMessage).catch(() => {});
-
-      // Q&A pair ሆኖ ቀምጥ — user message + bot reply ሁለቱም
       saveQAPair(userMessage, botReply, 'private_teaching', '', true).catch(() => {});
-
-      // Intent ሆኖ ቀምጥ — group ላይ ይጠቀምበታል
       updateKnowledge({
         intents: [{
           pattern: userMessage,
@@ -1566,4 +1598,4 @@ BEHAVIOR:
 
 export function clearPrivateHistory(userId) {
   privateChatHistories.delete(userId);
-  }
+}
