@@ -317,7 +317,7 @@ async function fetchRefFromUrl(url) {
       }
     }
 
-    // ── Fallback: JS bundle ውስጥ inline data ፈልግ ──
+    // ── Fallback: JS bundle ውስጥ API path ፈልጎ ቀጥታ ጠራ ──
     console.log('[RefFetch] All API endpoints failed — trying JS bundle scan');
     const pageRes = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
@@ -325,9 +325,8 @@ async function fetchRefFromUrl(url) {
     });
     const html = await pageRes.text();
 
-    // JS file paths ፈልግ
     const scriptMatches = html.match(/src="([^"]+\.js[^"]*)"/g) || [];
-    for (const scriptTag of scriptMatches.slice(0, 3)) {
+    for (const scriptTag of scriptMatches.slice(0, 5)) {
       const scriptPath = scriptTag.replace(/src="|"/g, '');
       const scriptUrl = scriptPath.startsWith('http')
         ? scriptPath
@@ -337,13 +336,39 @@ async function fetchRefFromUrl(url) {
         const scriptRes = await fetch(scriptUrl, { timeout: 10000 });
         const scriptText = await scriptRes.text();
 
-        // API endpoint pattern ፈልግ
-        const apiMatch = scriptText.match(/["'`](\/api\/[^"'`\s]{3,50})["'`]/);
-        if (apiMatch) {
-          console.log('[RefFetch] Found API path in JS bundle:', apiMatch[1]);
+        // ሁሉም /api/ paths ፈልግ
+        const apiMatches = scriptText.match(/["'`](\/api\/[^"'`\s]{3,80})["'`]/g) || [];
+        for (const match of apiMatches) {
+          const apiPath = match.replace(/["'`]/g, '');
+          console.log('[RefFetch] Found API path in JS bundle:', apiPath);
+
+          // ── ያገኘውን endpoint ቀጥታ ጠራ ──
+          const fullEndpoint = `https://Mbreciept.cbe.com.et${apiPath}/${token}`;
+          try {
+            const apiRes = await fetch(fullEndpoint, {
+              headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0',
+              },
+              timeout: 10000,
+            });
+            console.log(`[RefFetch] JS-found endpoint → ${apiRes.status}: ${fullEndpoint}`);
+
+            if (apiRes.ok) {
+              const data = await apiRes.json();
+              console.log('[RefFetch] JS-found data:', JSON.stringify(data).slice(0, 300));
+              const ref = findRefInObject(data);
+              if (ref) {
+                console.log('[RefFetch] ✅ Found ref via JS bundle:', ref);
+                return ref;
+              }
+            }
+          } catch (e) {
+            console.log('[RefFetch] JS-found endpoint failed:', e.message);
+          }
         }
       } catch (e) {
-        // ignore
+        // ignore script fetch errors
       }
     }
 
