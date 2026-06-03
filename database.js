@@ -47,7 +47,6 @@ async function query(sql, params = [], retries = Math.max(pools.length, 3)) {
 }
 
 export async function initDB() {
-  // ── Knowledge ──
   await query(`
     CREATE TABLE IF NOT EXISTS knowledge (
       id SERIAL PRIMARY KEY,
@@ -57,7 +56,6 @@ export async function initDB() {
     )
   `);
 
-  // ── History ──
   await query(`
     CREATE TABLE IF NOT EXISTS history (
       id SERIAL PRIMARY KEY,
@@ -71,7 +69,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Lottery ──
   await query(`
     CREATE TABLE IF NOT EXISTS lottery (
       id SERIAL PRIMARY KEY,
@@ -82,7 +79,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Lottery Results ── ✅ አዲስ
   await query(`
     CREATE TABLE IF NOT EXISTS lottery_results (
       id SERIAL PRIMARY KEY,
@@ -96,7 +92,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Lottery Live Events ── ✅ አዲስ
   await query(`
     CREATE TABLE IF NOT EXISTS lottery_live_events (
       id SERIAL PRIMARY KEY,
@@ -106,7 +101,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Bot State ──
   await query(`
     CREATE TABLE IF NOT EXISTS bot_state (
       id INTEGER PRIMARY KEY DEFAULT 1,
@@ -116,7 +110,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Payment SMS ──
   await query(`
     CREATE TABLE IF NOT EXISTS payment_sms (
       id SERIAL PRIMARY KEY,
@@ -129,7 +122,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Payment Screenshots ──
   await query(`
     CREATE TABLE IF NOT EXISTS payment_screenshots (
       id SERIAL PRIMARY KEY,
@@ -142,7 +134,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Token Usage ──
   await query(`
     CREATE TABLE IF NOT EXISTS token_usage (
       id SERIAL PRIMARY KEY,
@@ -154,7 +145,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Action Logs ──
   await query(`
     CREATE TABLE IF NOT EXISTS action_logs (
       id SERIAL PRIMARY KEY,
@@ -171,7 +161,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Q&A Pairs ──
   await query(`
     CREATE TABLE IF NOT EXISTS qa_pairs (
       id SERIAL PRIMARY KEY,
@@ -188,7 +177,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Board Messages ──
   await query(`
     CREATE TABLE IF NOT EXISTS board_messages (
       id SERIAL PRIMARY KEY,
@@ -199,7 +187,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Board Edits ──
   await query(`
     CREATE TABLE IF NOT EXISTS board_edits (
       id SERIAL PRIMARY KEY,
@@ -212,7 +199,6 @@ export async function initDB() {
     )
   `);
 
-  // ── Deleted Messages ──
   await query(`
     CREATE TABLE IF NOT EXISTS deleted_messages (
       id SERIAL PRIMARY KEY,
@@ -542,7 +528,7 @@ export async function clearLottery() {
   await query(`DELETE FROM lottery`);
 }
 
-// ===== LOTTERY RESULTS ✅ አዲስ =====
+// ===== LOTTERY RESULTS =====
 export async function saveLotteryResult({ telegramId, series, first, second, third, announcedAt, status }) {
   console.log(`[DB] saveLotteryResult — Series: ${series} | 1ኛ: ${first} | 2ኛ: ${second} | 3ኛ: ${third}`);
   await query(`
@@ -571,7 +557,7 @@ export async function cleanupLotteryResults() {
   return { results: results.rowCount, events: events.rowCount };
 }
 
-// ===== LOTTERY LIVE EVENTS ✅ አዲስ =====
+// ===== LOTTERY LIVE EVENTS =====
 export async function saveLotteryLiveEvent({ telegramId, isLive, triggeredAt }) {
   console.log(`[DB] saveLotteryLiveEvent — TelegramID: ${telegramId} | isLive: ${isLive}`);
   await query(`
@@ -658,6 +644,26 @@ export async function cleanupOldData() {
 }
 
 // ===== PAYMENT =====
+
+// ── SMS ref already used check ──
+export async function getSmsPaymentByRef(refNo) {
+  const res = await query(`
+    SELECT * FROM payment_sms WHERE ref_no = $1 LIMIT 1
+  `, [refNo]);
+  return res.rows[0] || null;
+}
+
+// ── Screenshot ref already matched check ──
+export async function isRefMatchedAlready(refNo) {
+  if (!refNo) return false;
+  const res = await query(`
+    SELECT id FROM payment_screenshots
+    WHERE ref_no = $1 AND matched = TRUE
+    LIMIT 1
+  `, [refNo]);
+  return res.rows.length > 0;
+}
+
 export async function saveSmsPayment(refNo, amount, type, rawSms) {
   console.log(`[DB] saveSmsPayment called — Ref: ${refNo} | Amount: ${amount} | Type: ${type}`);
 
