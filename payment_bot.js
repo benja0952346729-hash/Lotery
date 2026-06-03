@@ -13,6 +13,7 @@ import {
   getSmsPaymentByRef,
   isRefMatchedAlready,
 } from './database.js';
+import { learnFromMessage, addToBuffer } from './aiService.js';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID;
@@ -35,12 +36,19 @@ export async function handleSmsWebhook(rawSms) {
     return { success: false, reason: 'no_ref' };
   }
 
-  // ── Used REF check — ዳግም አይስራ ──
+  // ── Used REF check ──
   const existing = await getSmsPaymentByRef(refNo);
   if (existing) {
     console.log(`[SMS] Ref ${refNo} already used — skipping`);
     return { success: false, reason: 'ref_already_used', refNo };
   }
+
+  // ── Bot ይማራል — SMS መጣ ──
+  setImmediate(() => {
+    learnFromMessage({
+      text: `[PAYMENT_FLOW] SMS received — Type: ${type} | Amount: ETB ${amount} | Time: ${new Date().toLocaleString()} | Status: SMS ደረሰ፣ Screenshot ይጠበቃል`
+    }, true).catch(() => {});
+  });
 
   const result = await saveSmsPayment(refNo, amount, type, rawSms);
   return { success: true, matched: result.matched || null, ...parsed };
@@ -50,6 +58,7 @@ export async function handleSmsWebhook(rawSms) {
 export async function handlePaymentPhoto(bot, msg) {
   const chatId = msg.chat.id;
   const telegramId = msg.from.id;
+  const username = msg.from?.username || msg.from?.first_name || 'Unknown';
 
   console.log(`[Payment] 📸 Photo received from ${telegramId} in chat ${chatId}`);
 
@@ -96,6 +105,13 @@ export async function handlePaymentPhoto(bot, msg) {
       return;
     }
 
+    // ── Bot ይማራል — Screenshot መጣ ──
+    setImmediate(() => {
+      learnFromMessage({
+        text: `[PAYMENT_FLOW] Screenshot received — TelegramID: ${telegramId} | Username: @${username} | Type: ${analysis.photoType} | Time: ${new Date().toLocaleString()} | Status: Screenshot ደረሰ፣ SMS ይጠበቃል`
+      }, true).catch(() => {});
+    });
+
     const saved = await saveScreenshotPayment(
       telegramId,
       analysis.refNo,
@@ -111,6 +127,13 @@ export async function handlePaymentPhoto(bot, msg) {
         `✅ Screenshot ተቀብሏል። SMS ሲረጋገጥ ይወጣዋል...\n🔖 Ref: ${analysis.refNo}`,
         { reply_to_message_id: msg.message_id }
       );
+
+      // ── Bot ይማራል — Pending ──
+      setImmediate(() => {
+        learnFromMessage({
+          text: `[PAYMENT_FLOW] Payment pending — TelegramID: ${telegramId} | Username: @${username} | Type: ${analysis.photoType} | Ref: ${analysis.refNo} | Status: Screenshot አለ፣ SMS አልደረሰም — ይጠበቃል`
+        }, true).catch(() => {});
+      });
     }
 
   } catch (err) {
@@ -154,6 +177,13 @@ export async function handleLotteryPhoto(bot, msg) {
       third: result.third,
       announcedAt: new Date().toISOString(),
       status: 'ውጤት ታወጀ',
+    });
+
+    // ── Bot ይማራል — Lottery result ──
+    setImmediate(() => {
+      learnFromMessage({
+        text: `[LOTTERY_FLOW] Lottery result announced — Series: ${result.series} | 1ኛ: ${result.first} | 2ኛ: ${result.second} | 3ኛ: ${result.third} | Time: ${new Date().toLocaleString()}`
+      }, true).catch(() => {});
     });
 
     await bot.sendMessage(
@@ -200,7 +230,7 @@ export async function handleLotterySticker(bot, msg) {
 // ===== SMS PARSER =====
 async function parseSms(sms) {
 
-  // 1️⃣ CBE Credit SMS — Ref ቀጥታ አለ
+  // 1️⃣ CBE Credit SMS
   const cbeCredit = sms.match(
     /Credited with ETB ([\d,]+\.?\d*).+?Ref No\s+([A-Z0-9]+)/s
   );
@@ -212,7 +242,7 @@ async function parseSms(sms) {
     };
   }
 
-  // 2️⃣ CBE Transfer SMS — Ref URL ውስጥ ነው
+  // 2️⃣ CBE Transfer SMS
   const cbeTransfer = sms.match(
     /(?:received|transferred) ETB ([\d,]+\.?\d*).+(https:\/\/Mbreciept\S+)/si
   );
@@ -224,7 +254,7 @@ async function parseSms(sms) {
     return { type: 'CBE', amount, refNo };
   }
 
-  // 3️⃣ Telebirr to CBE — bank transaction number
+  // 3️⃣ Telebirr to CBE
   const telebirrToCbe = sms.match(
     /transferred ETB ([\d,]+\.?\d*).+?bank transaction number is\s+([A-Z0-9]+)/s
   );
@@ -236,7 +266,7 @@ async function parseSms(sms) {
     };
   }
 
-  // 4️⃣ Telebirr Received — transaction number ቀጥታ አለ
+  // 4️⃣ Telebirr Received
   const telebirrReceived = sms.match(
     /received ETB ([\d,]+\.?\d*).+?transaction number is\s+([A-Z0-9]+)/s
   );
@@ -248,11 +278,10 @@ async function parseSms(sms) {
     };
   }
 
-  // REF ከሌለ → null → ignore
   return null;
 }
 
-// ===== CBE RECEIPT URL — Jina AI Reader (FIXED) =====
+// ===== CBE RECEIPT URL =====
 async function fetchRefFromUrl(url) {
   try {
     console.log('[RefFetch] Using Jina AI reader for:', url);
@@ -276,7 +305,6 @@ async function fetchRefFromUrl(url) {
     const text = await res.text();
     console.log('[RefFetch] Jina text snippet:', text.slice(0, 500));
 
-    // VAT Receipt No ወይም Reference No ፈልግ
     const patterns = [
       /VAT Receipt No[:\s]+([A-Z0-9]+)/i,
       /Reference No\.\s*\(VAT Invoice No\)[:\s]+([A-Z0-9]+)/i,
@@ -320,6 +348,14 @@ async function describePhotoInAmharic(description) {
 // ===== GROQ — PAYMENT SCREENSHOT ANALYZER =====
 async function analyzeScreenshot(imageBase64) {
   const prompt = `You are a payment receipt analyzer. Look at this image and extract information.
+
+CRITICAL: Read the reference number with extreme care.
+- Go character by character slowly
+- These characters are easily confused — check each one carefully:
+  * Number 0 (zero) vs Letter O
+  * Number 1 (one) vs Letter I
+  * Number 5 (five) vs Letter S
+- After reading, double-check the full reference number once more before returning it
 
 Respond ONLY in this exact JSON format (no markdown, no extra text):
 {
@@ -374,8 +410,8 @@ A REAL Ethiopian lottery ticket:
 - Contains only a short Amharic label and a number (e.g. "ቢኤ 75")
 
 NOT a lottery ticket → MUST return type "other":
-- CBE bank SMS or notification (contains words like "Credited", "ETB", "Ref No", "Account", "Balance")
-- Telebirr payment screenshot (contains "received ETB", "transaction")
+- CBE bank SMS or notification
+- Telebirr payment screenshot
 - Any phone screen or digital content
 - Any bank receipt, document, or paper with long text
 - Screenshots of any kind
@@ -420,7 +456,7 @@ Respond ONLY in this exact JSON format (no markdown, no extra text):
 
 // ===== MATCH NOTIFICATION =====
 async function notifyMatch(bot, matchData, replyToMsgId = null, chatId = null) {
-  const { telegramId, amount, type } = matchData;
+  const { telegramId, amount, type, refNo } = matchData;
 
   const message =
     `✅ ክፍያ ተረጋግጧል!\n` +
@@ -429,6 +465,18 @@ async function notifyMatch(bot, matchData, replyToMsgId = null, chatId = null) {
     `👤 Telegram ID: ${telegramId}`;
 
   console.log('[Payment] Approved:', matchData);
+
+  // ── Bot ይማራል — Match ሆነ ──
+  setImmediate(() => {
+    learnFromMessage({
+      text: `[PAYMENT_FLOW] ✅ Payment approved — TelegramID: ${telegramId} | Amount: ETB ${amount} | Via: ${type} | Time: ${new Date().toLocaleString()} | Flow: SMS ደረሰ + Screenshot ተላከ = Match ሆነ → Approved`
+    }, true).catch(() => {});
+
+    // Buffer ውስጥም ይጨምር — DeepLearning ጋር አንድ ላይ
+    addToBuffer({
+      text: `[PAYMENT_FLOW] Payment completed — ETB ${amount} via ${type} | TelegramID: ${telegramId}`
+    }, true).catch(() => {});
+  });
 
   if (chatId && replyToMsgId) {
     await bot.sendMessage(chatId, message, { reply_to_message_id: replyToMsgId });
