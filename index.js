@@ -779,7 +779,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 // ── SMS Webhook ──
-app.post('/sms', express.text(), async (req, res) => {
+app.post('/sms', express.text({ type: '*/*' }), async (req, res) => {
   try {
     const result = await handleSmsWebhook(req.body);
     res.json(result);
