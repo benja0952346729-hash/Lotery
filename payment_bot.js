@@ -214,8 +214,8 @@ async function parseSms(sms) {
 
   // 2️⃣ CBE Transfer SMS — Ref URL ውስጥ ነው
   const cbeTransfer = sms.match(
-    /transferred ETB ([\d,]+\.?\d*).+(https:\/\/Mbreciept\S+)/si
-  );
+  /(?:received|transferred) ETB ([\d,]+\.?\d*).+(https:\/\/Mbreciept\S+)/si
+);
   if (cbeTransfer) {
     const amount = parseFloat(cbeTransfer[1].replace(',', ''));
     const receiptUrl = cbeTransfer[2].trim();
