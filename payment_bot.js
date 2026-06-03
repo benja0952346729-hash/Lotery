@@ -255,37 +255,41 @@ async function parseSms(sms) {
 // ===== CBE RECEIPT URL — Ref ያወጣል =====
 async function fetchRefFromUrl(url) {
   try {
-    const code = url.split('/').pop();
-    
-    // Token ጋር API ሞክር
-    const apiRes = await fetch(`https://Mbreciept.cbe.com.et/api/receipt`, {
-      method: 'POST',
+    const res = await fetch(url, {
       headers: {
-        'Authorization': `Bearer ${code}`,
-        'X-Token': code,
-        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Android 13; Mobile)',
+        'Accept': 'text/html',
       },
-      body: JSON.stringify({ token: code }),
       timeout: 15000,
     });
-    
-    console.log('[RefFetch] API status:', apiRes.status);
-    const data = await apiRes.text();
-    console.log('[RefFetch] API response:', data.slice(0, 300));
 
-    const parsed = JSON.parse(data);
-    const ref = parsed?.vatReceiptNo || parsed?.refNo || parsed?.referenceNo || parsed?.reference;
-    if (ref) {
-      console.log('[RefFetch] Found ref:', ref);
-      return ref;
+    console.log('[RefFetch] Page status:', res.status);
+    const html = await res.text();
+    console.log('[RefFetch] HTML snippet:', html.slice(0, 500));
+
+    // CBE receipt ውስጥ "Ref No", "Reference No", "VAT Receipt No" ይፈልጋል
+    const patterns = [
+      /Ref(?:erence)?\s*No[:\s]+([A-Z0-9]+)/i,
+      /VAT\s*Receipt\s*No[:\s]+([A-Z0-9]+)/i,
+      /Transaction\s*(?:Ref|ID|No)[:\s]+([A-Z0-9]+)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match) {
+        console.log('[RefFetch] Found ref:', match[1]);
+        return match[1];
+      }
     }
+
+    console.log('[RefFetch] Ref not found in HTML');
+    return null;
 
   } catch (err) {
     console.error('[RefFetch] Failed:', err.message);
+    return null;
   }
-  return null;
 }
-
 // ===== GROQ — በአማርኛ ምስሉን ያብራራል =====
 async function describePhotoInAmharic(description) {
   const response = await groq.chat.completions.create({
