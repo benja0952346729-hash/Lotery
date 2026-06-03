@@ -592,10 +592,14 @@ const newBoardText = newLines.join('\n');
 
     // Send response — ሁልጊዜ ይምለስ
     if (result.response) {
-      const sentMsg = await bot.sendMessage(chatId, result.response, {
-        reply_to_message_id: msg.message_id,
-      });
+  // ወዲያው User ላክ
+  const sentMsg = await bot.sendMessage(chatId, result.response, {
+    reply_to_message_id: msg.message_id,
+  });
 
+  // ከዛ በኋላ background
+  setImmediate(async () => {
+    try {
       addToBuffer(msg, false, result.response);
 
       const ratingId = `rate_${sentMsg.message_id}_${Date.now()}`;
@@ -628,7 +632,6 @@ const newBoardText = newLines.join('\n');
         });
       }
 
-      // Low confidence ከሆነ admin ያሳውቅ ብቻ — አይቆምም
       if (result.confidence < CONFIDENCE_THRESHOLD) {
         await alertAdmin(
           bot,
@@ -638,7 +641,12 @@ Bot: "${result.response}"`,
           'WARNING'
         );
       }
+    } catch (err) {
+      console.error('[BACKGROUND]', err.message);
+      await alertAdmin(bot, `⚠️ Background error: ${err.message}`, 'WARNING');
     }
+  });
+}
   } catch (err) {
     console.error('[GROUP] Error:', err.message);
     await alertAdmin(bot, `🚨 Error: ${err.message}`, 'ERROR');
