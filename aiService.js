@@ -1,6 +1,7 @@
+import Groq from 'groq-sdk';
 import OpenAI from 'openai';
 import { EventEmitter } from 'events';
-import { getNextDeepSeekKey, rotateDeepSeekKey } from './keys.js';
+import { getNextDeepSeekKey, rotateDeepSeekKey, getNextGroqKey, rotateGroqKey } from './keys.js';
 import {
   readKnowledge, updateKnowledge, getHistory,
   getLotteryList, getTokenUsage, addTokenUsage,
@@ -70,7 +71,42 @@ export async function getTokenStats() {
 }
 
 // ─────────────────────────────────────────
-// NVIDIA / DeepSeek CALLER
+// GROK (xAI) CALLER — ለ RESPONSE ብቻ
+// ─────────────────────────────────────────
+async function callGrok(prompt, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const key = getNextGroqKey();
+      const client = new Groq({
+        apiKey: key,
+      });
+      const completion = await client.chat.completions.create({
+        model: 'mixtral-8x7b-32768',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 2048,
+        temperature: 0.7,
+      });
+      await trackTokens(
+        'grok-xai',
+        completion.usage?.prompt_tokens || 0,
+        completion.usage?.completion_tokens || 0
+      );
+      return completion.choices[0]?.message?.content || '';
+    } catch (err) {
+      if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
+        console.log('[GROK] Rate limit — rotating key...');
+        rotateGroqKey();
+        await new Promise(res => setTimeout(res, 2000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('All Grok keys exhausted');
+}
+
+// ─────────────────────────────────────────
+// DEEPSEEK/NVIDIA CALLER — ለ LEARNING
 // ─────────────────────────────────────────
 async function callDeepSeek(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -140,8 +176,39 @@ export async function testNvidiaConnection() {
   }
 }
 
+export async function testGrokConnection() {
+  try {
+    console.log('🔌 Grok (xAI) እየተገናኘ...');
+    const key = getNextGroqKey();
+    const client = new Groq({
+      apiKey: key,
+    });
+    const completion = await client.chat.completions.create({
+      model: 'mixtral-8x7b-32768',
+      messages: [{ role: 'user', content: 'say "ok" only' }],
+      max_tokens: 5,
+      temperature: 0,
+    });
+    const reply = completion.choices[0]?.message?.content || '';
+    console.log('✅ Grok (xAI) Online — Mixtral 8x7B ዝግጁ ነው!');
+    console.log(`🧠 Test response: "${reply.trim()}"`);
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: '✅ Grok (xAI) Online — Mixtral 8x7B ዝግጁ ነው!'
+    });
+    return true;
+  } catch (err) {
+    console.error('❌ Grok connection failed:', err.message);
+    learningEvents.emit('activity', {
+      type: 'error',
+      msg: `❌ Grok connection failed: ${err.message}`
+    });
+    return false;
+  }
+}
+
 // ─────────────────────────────────────────
-// LEARN FROM EDIT
+// LEARN FROM EDIT (DeepSeek)
 // ─────────────────────────────────────────
 export async function learnFromEdit(messageId, beforeText, afterText) {
   const prompt = `
@@ -207,7 +274,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// LEARN FROM DELETE
+// LEARN FROM DELETE (DeepSeek)
 // ─────────────────────────────────────────
 export async function learnFromDelete(deletedText, context = '') {
   const prompt = `
@@ -258,7 +325,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// HANDLE ADMIN TEACHING
+// HANDLE ADMIN TEACHING (DeepSeek)
 // ─────────────────────────────────────────
 export async function handleAdminTeaching(adminMessage, context = '') {
   const prompt = `
@@ -311,8 +378,8 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// HANDLE ADMIN COMMAND
-// ─────────────────────────────────────────
+// HANDLE ADMIN COMMAND (DeepSeek)
+// ───────────────────────────────────���─────
 export async function handleAdminCommand(adminMessage, currentBoardText = '') {
   const knowledge = await readKnowledge();
   const actionLogs = await getActionLogs(0.7);
@@ -370,7 +437,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// TRY BOT ACTION
+// TRY BOT ACTION (DeepSeek)
 // ─────────────────────────────────────────
 export async function decideBotAction(userMessage, username, currentBoardText) {
   const knowledge = await readKnowledge();
@@ -433,7 +500,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// ACTION LEARNING
+// ACTION LEARNING (DeepSeek)
 // ─────────────────────────────────────────
 export async function learnAction(actionType, trigger, reason, details = {}) {
   try {
@@ -481,7 +548,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// Q&A PAIR LEARNING
+// Q&A PAIR LEARNING (DeepSeek)
 // ─────────────────────────────────────────
 export async function learnQAPair(userMessage, adminReply, context = '') {
   try {
@@ -536,7 +603,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// LEARN FROM MESSAGE
+// LEARN FROM MESSAGE (DeepSeek)
 // ─────────────────────────────────────────
 export async function learnFromMessage(message, isAdminMsg = false) {
   const knowledge = await readKnowledge();
@@ -586,13 +653,13 @@ Return ONLY valid JSON:
     });
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Learn error:', err.message);
+    console.error('[DEEPSEEK] Learn error:', err.message);
     return null;
   }
 }
 
 // ─────────────────────────────────────────
-// LEARN LOTTERY RULES
+// LEARN LOTTERY RULES (DeepSeek)
 // ─────────────────────────────────────────
 export async function learnLotteryRules(adminMessage) {
   const prompt = `
@@ -620,13 +687,13 @@ Return ONLY valid JSON:
     }
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Rule error:', err.message);
+    console.error('[DEEPSEEK] Rule error:', err.message);
     return null;
   }
 }
 
 // ─────────────────────────────────────────
-// BACKGROUND LEARNER
+// BACKGROUND LEARNER (DeepSeek)
 // ─────────────────────────────────────────
 async function deepSeekBackgroundLearn(userMessage, botResponse, context = '') {
   const knowledge = await readKnowledge();
@@ -809,7 +876,7 @@ export async function handleIncomingMessage(message, userId, username, currentBo
 }
 
 // ─────────────────────────────────────────
-// GENERATE RESPONSE
+// GENERATE RESPONSE — Grok (xAI) ብቻ
 // ─────────────────────────────────────────
 export async function generateResponse(userMessage, userId, username, currentBoardText = '') {
   const similarPairs = await findSimilarQA(userMessage, 3);
@@ -844,7 +911,7 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
   "confidence": 0.9
 }`;
 
-  const raw = await callDeepSeek(intentPrompt);
+  const raw = await callGrok(intentPrompt);
 
   let parsed;
   try {
@@ -889,7 +956,7 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// HANDLE REGISTRATION
+// HANDLE REGISTRATION — Grok (xAI)
 // ─────────────────────────────────────────
 export async function handleRegistration(userId, username, requestedNumber) {
   const systemPrompt = await buildSystemPrompt();
@@ -906,7 +973,7 @@ export async function handleRegistration(userId, username, requestedNumber) {
   else situation = `Number ${requestedNumber} available for ${username}`;
 
   const fullPrompt = systemPrompt + `\n\nSituation: ${situation}. @${username} wants number ${requestedNumber}. Respond as admin in Amharic.`;
-  const response = await callDeepSeek(fullPrompt);
+  const response = await callGrok(fullPrompt);
 
   setImmediate(() => {
     deepSeekBackgroundLearn(
@@ -924,12 +991,12 @@ export async function handleRegistration(userId, username, requestedNumber) {
 }
 
 // ─────────────────────────────────────────
-// GENERATE ANNOUNCEMENT
+// GENERATE ANNOUNCEMENT — Grok (xAI)
 // ─────────────────────────────────────────
 export async function generateAnnouncement(topic, details) {
   const systemPrompt = await buildSystemPrompt();
   const fullPrompt = systemPrompt + `\n\nWrite announcement about: ${topic}. ${details}. Admin Amharic style with emojis.`;
-  const response = await callDeepSeek(fullPrompt);
+  const response = await callGrok(fullPrompt);
 
   setImmediate(() => {
     deepSeekBackgroundLearn(`announcement: ${topic}`, response, 'announcement')
@@ -940,7 +1007,7 @@ export async function generateAnnouncement(topic, details) {
 }
 
 // ─────────────────────────────────────────
-// GENERATE LEARNING SUMMARY
+// GENERATE LEARNING SUMMARY (DeepSeek)
 // ─────────────────────────────────────────
 export async function generateLearningSummary() {
   const knowledge = await readKnowledge();
@@ -1009,13 +1076,13 @@ Return ONLY valid JSON:
     });
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Summary error:', err.message);
+    console.error('[DEEPSEEK] Summary error:', err.message);
     return null;
   }
 }
 
 // ─────────────────────────────────────────
-// BATCH LEARNING SYSTEM
+// BATCH LEARNING SYSTEM (DeepSeek)
 // ─────────────────────────────────────────
 const messageBuffer = [];
 const BATCH_SIZE = 50;
@@ -1143,7 +1210,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// 🌙 24HR DEEP LEARNING
+// 🌙 24HR DEEP LEARNING (DeepSeek)
 // ─────────────────────────────────────────
 export async function deepNightLearning() {
   learningEvents.emit('activity', {
@@ -1229,7 +1296,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// ⭐ LEARN FROM RATING
+// ⭐ LEARN FROM RATING (DeepSeek)
 // ─────────────────────────────────────────
 export async function learnFromRating(userText, botResponse, score) {
   const RATING_LABELS = { 1: '👎 ዝቅተኛ', 2: '😐 መካከለኛ', 3: '👍 አሪፍ', 4: '🔥 በጣም አሪፍ' };
@@ -1305,7 +1372,7 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// 📷 ANALYZE PHOTO
+// 📷 ANALYZE PHOTO (DeepSeek)
 // ─────────────────────────────────────────
 export async function analyzePhoto(base64Image, caption = '', username = '', context = '') {
   const knowledge = await readKnowledge();
@@ -1464,7 +1531,7 @@ async function addToPrivateHistory(userId, role, content) {
 }
 
 // ─────────────────────────────────────────
-// PRIVATE CHAT TEACHING MODE
+// PRIVATE CHAT TEACHING MODE — Grok (xAI)
 // ─────────────────────────────────────────
 export async function handlePrivateTeaching(userId, userMessage) {
   const knowledge = await readKnowledge();
@@ -1503,14 +1570,13 @@ BEHAVIOR:
   await addToPrivateHistory(userId, 'user', userMessage);
 
   try {
-    const key = getNextDeepSeekKey();
-    const client = new OpenAI({
+    const key = getNextGroqKey();
+    const client = new Groq({
       apiKey: key,
-      baseURL: 'https://integrate.api.nvidia.com/v1',
     });
 
     const completion = await client.chat.completions.create({
-      model: 'deepseek-ai/deepseek-v4-flash',
+      model: 'mixtral-8x7b-32768',
       messages: [
         { role: 'system', content: systemPrompt },
         ...historyMessages,
@@ -1521,7 +1587,7 @@ BEHAVIOR:
     });
 
     await trackTokens(
-      'nvidia-deepseek',
+      'grok-xai',
       completion.usage?.prompt_tokens || 0,
       completion.usage?.completion_tokens || 0
     );
@@ -1566,4 +1632,4 @@ BEHAVIOR:
 
 export function clearPrivateHistory(userId) {
   privateChatHistories.delete(userId);
-  }
+}
