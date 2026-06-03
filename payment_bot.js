@@ -70,9 +70,10 @@ export async function handlePaymentPhoto(bot, msg) {
     );
 
     if (analysis.photoType !== 'CBE' && analysis.photoType !== 'Telebirr') {
+      const amharicDesc = await describePhotoInAmharic(analysis.description);
       await bot.sendMessage(
         chatId,
-        `❌ ይህ የክፍያ ደረሰኝ አይደለም።\n📋 ምስሉ: ${analysis.description}`,
+        amharicDesc,
         { reply_to_message_id: msg.message_id }
       );
       return;
@@ -263,6 +264,22 @@ async function fetchRefFromUrl(url) {
     console.error('[RefFetch] Failed:', err.message);
     return null;
   }
+}
+
+// ===== GROQ — በአማርኛ ምስሉን ያብራራል (llama-3.3-70b) =====
+async function describePhotoInAmharic(description) {
+  const response = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    messages: [
+      {
+        role: 'user',
+        content: `ይህ ምስል "${description}" ነው። በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። "አይደለም" ወይም "አልሆነም" አትበል። ምን እንደሆነ ብቻ ግለጽ። አጭር ሁን።`,
+      },
+    ],
+    max_tokens: 100,
+    temperature: 0.3,
+  });
+  return response.choices[0].message.content.trim();
 }
 
 // ===== GROQ — PAYMENT SCREENSHOT ANALYZER =====
