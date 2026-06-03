@@ -529,13 +529,15 @@ try {
       const boardMsg = await getBoardMessage();
       if (boardMsg?.message_id) {
         const beforeText = boardMsg.text || '';
-        const lines = beforeText.split('\n');
-        const newLines = lines.map(line => {
-          const match = line.match(new RegExp(`^${result.slotNumber}#\\s*$`));
-          if (match) return `${result.slotNumber}# ${username} ⏳`;
-          return line;
-        });
-        const newBoardText = newLines.join('\n');
+        const decision = await decideBoardAction(text, username, beforeText);
+const newEntry = decision?.boardEdit?.newEntry;
+
+const newLines = beforeText.split('\n').map(line =>
+  (newEntry && line.includes(`${result.slotNumber}#`))
+    ? newEntry
+    : line
+);
+const newBoardText = newLines.join('\n');
 
         try {
           await bot.editMessageText(newBoardText, {
@@ -564,17 +566,20 @@ try {
             msg: `✅ Bot registered @${username} → slot ${result.slotNumber}`
           });
         } catch (editErr) {
-          if (editErr.message?.includes("message can't be edited")) {
-            learningEvents.emit('activity', {
-              type: 'eval',
-              msg: `⚠️ Board edit skipped — not bot's message (learning board)`
-            });
-          } else {
-            console.error('[BOARD EDIT] Error:', editErr.message);
-          }
-        }
+  if (editErr.message?.includes('message is not modified')) {
+    // AI ምንም አልቀየረም — ዝም በል
+    console.log('[BOARD EDIT] No change detected');
+  } else if (editErr.message?.includes("message can't be edited")) {
+    learningEvents.emit('activity', {
+      type: 'eval',
+      msg: `⚠️ Board edit skipped — not bot's message`
+    });
+  } else {
+    console.error('[BOARD EDIT] Error:', editErr.message);
+  }
+}
+      await alertAdmin(bot, `✅ Bot board edit አደረገ — slot ${result.slotNumber}`, 'SUCCESS');
       }
-      await alertAdmin(bot, `✅ Bot registered @${username} → slot ${result.slotNumber} ⏳`, 'SUCCESS');
     }
 
     // Send response — ሁልጊዜ ይምለስ
