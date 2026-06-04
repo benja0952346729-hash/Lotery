@@ -867,15 +867,17 @@ export async function handleIncomingMessage(message, userId, username, currentBo
 // GENERATE RESPONSE
 // ─────────────────────────────────────────
 export async function generateResponse(userMessage, userId, username, currentBoardText = '') {
+
+  // ── Step 1: Cache check — ወዲያው ✅ ──
   const similarPairs = await findSimilarQA(userMessage, 3);
   const exactMatch = similarPairs.find(p =>
-    p.user_message === userMessage && p.confidence >= 0.9
+    p.user_message === userMessage && p.confidence >= 0.7
   );
 
   if (exactMatch) {
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `🎯 Exact Q&A match — ${Math.round(exactMatch.confidence * 100)}%`
+      msg: `🎯 Cache hit — ${Math.round(exactMatch.confidence * 100)}%`
     });
     return {
       response: exactMatch.admin_reply,
@@ -884,26 +886,33 @@ export async function generateResponse(userMessage, userId, username, currentBoa
     };
   }
 
-  const systemPrompt = await buildSystemPrompt(currentBoardText);
-  const intentPrompt = systemPrompt + `
+  // ── Step 2: ትንሽ prompt — board + 5 rules ብቻ ──
+  const knowledge = await readKnowledge();
 
-User message: "${username}: ${userMessage}"
-Current board: """${currentBoardText || 'none'}"""
+  const miniPrompt = `አንተ Amharic lottery bot ነህ። ከ admin ተምረሃል።
 
-Decide the ACTION and RESPONSE. Return ONLY valid JSON:
+Top rules:
+${knowledge.rules?.slice(0, 5).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None'}
+
+Current board:
+${currentBoardText || 'No board yet'}
+
+User: @${username}: "${userMessage}"
+
+ወዲያው በአማርኛ መልስ። Return ONLY valid JSON:
 {
-  "intent": "register | check_availability | greeting | payment | question | other",
+  "intent": "register | greeting | payment | question | other",
   "slotNumber": null,
-  "action": "register_slot | edit_board | respond_only | check_slot",
+  "action": "register_slot | respond_only | send_board",
   "response": "Amharic response exactly like admin",
   "confidence": 0.9
 }`;
 
-  const raw = await callDeepSeekResponse(intentPrompt);
+  const raw = await callDeepSeekResponse(miniPrompt);
 
   let parsed;
   try {
-    const clean = raw.replace(/\`\`\`json|\`\`\`/g, '').trim();
+    const clean = raw.replace(/```json|```/g, '').trim();
     parsed = JSON.parse(clean);
   } catch {
     parsed = {
@@ -914,18 +923,36 @@ Decide the ACTION and RESPONSE. Return ONLY valid JSON:
     };
   }
 
-  // Background learning — 5 minutes delay
-  setTimeout(() => {
-    deepSeekBackgroundLearn(userMessage, parsed.response, `User: ${username}, Intent: ${parsed.intent}`)
-      .catch(err => console.error('[BACKGROUND] Error:', err.message));
-  }, 5 * 60 * 1000);
+  // ── Step 3: Background learning — ከ action በኋላ ──
+  setImmediate(async () => {
+    try {
+      // ሙሉ knowledge ያነባል — background ስለሆነ user አያውቅም
+      await deepSeekBackgroundLearn(
+        userMessage,
+        parsed.response,
+        `User: ${username}, Intent: ${parsed.intent}`
+      );
+
+      // Cache ያዘምናል — ቀጣይ ጊዜ ፈጣን
+      await saveQAPair(
+        userMessage,
+        parsed.response,
+        'auto_cached',
+        parsed.intent,
+        false
+      );
+
+    } catch (err) {
+      console.error('[BACKGROUND] Error:', err.message);
+    }
+  });
 
   return {
     response: parsed.response,
     intent: parsed.intent,
     action: parsed.action,
     slotNumber: parsed.slotNumber,
-    confidence: parsed.confidence || 1.0,
+    confidence: parsed.confidence || 0.9,
     fromCache: false,
   };
 }
