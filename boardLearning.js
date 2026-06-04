@@ -23,6 +23,28 @@ const boardExchanges = [];
 // ─────────────────────────────────────────
 // LEARN FROM ADMIN ACTION — ዋናው learning
 // ─────────────────────────────────────────
+
+// ─────────────────────────────────────────
+// SAFE JSON PARSER
+// ─────────────────────────────────────────
+function safeParseJSON(raw) {
+  if (!raw) return null;
+  try {
+    const clean = raw
+      .replace(/```json|```/g, '')
+      .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
+      .replace(/\uFEFF/g, '')
+      .trim();
+    return JSON.parse(clean);
+  } catch {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch { return null; }
+    }
+    return null;
+  }
+}
+
 export async function learnBoardAction(actionType, details) {
   try {
     // aiService.js ጋር shared context — አንድ ላይ ይማራሉ
