@@ -145,9 +145,21 @@ async function callDeepSeekLearn(prompt, retries = 3) {
 // ─────────────────────────────────────────
 // EXPORT — boardLearning.js ይጠቀምበታል
 // ─────────────────────────────────────────
+// Learning calls — background (learning keys)
 export async function callDeepSeekAPI(systemPrompt, userPrompt, apiKey, options = {}) {
   const prompt = systemPrompt + '\n\n' + userPrompt;
   const raw = await callDeepSeekLearn(prompt, options.retries || 3);
+  try {
+    return JSON.parse(raw.replace(/```json|```/g, '').trim());
+  } catch {
+    return null;
+  }
+}
+
+// Response calls — ፈጣን user-facing (response keys)
+export async function callDeepSeekAPIFast(systemPrompt, userPrompt, options = {}) {
+  const prompt = systemPrompt + '\n\n' + userPrompt;
+  const raw = await callDeepSeekResponse(prompt, options.retries || 3);
   try {
     return JSON.parse(raw.replace(/```json|```/g, '').trim());
   } catch {
