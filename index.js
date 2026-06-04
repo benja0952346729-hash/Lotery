@@ -18,7 +18,7 @@ import {
   learnQAPair, learnFromRating,
   addToBuffer,
   generateResponse, generateAnnouncement,
-  learnFromEdit, learnFromDelete, decideBotAction,
+  learnFromEdit, learnFromDelete,
   learnAction,
   handleIncomingMessage,
   handlePrivateTeaching,
