@@ -5,7 +5,6 @@ const { Pool } = pg;
 function loadPools() {
   const pools = [];
   let i = 1;
-  // ensure bounds checked first to avoid unnecessary env lookups and preserve ordering
   while (i <= 10 && process.env[`NEON_DB_${i}`]) {
     pools.push(new Pool({
       connectionString: process.env[`NEON_DB_${i}`],
@@ -271,19 +270,16 @@ function deepMergeArrays(target = {}, source = {}) {
     const tVal = target[key];
 
     if (Array.isArray(sVal) && Array.isArray(tVal)) {
-      // both arrays: try to dedupe
       const bothPrimitive = sVal.every(v => (v === null || typeof v !== 'object')) && tVal.every(v => (v === null || typeof v !== 'object'));
       if (bothPrimitive) {
         result[key] = Array.from(new Set([...(tVal || []), ...sVal]));
       } else {
-        // arrays of objects -> dedupe by JSON representation (stable enough for small arrays)
         const map = new Map();
         for (const item of [...(tVal || []), ...sVal]) {
           try {
             const k = (item && typeof item === 'object') ? JSON.stringify(item) : String(item);
             if (!map.has(k)) map.set(k, item);
           } catch (e) {
-            // fallback for circular objects
             const k = String(item);
             if (!map.has(k)) map.set(k, item);
           }
@@ -670,6 +666,7 @@ export async function cleanupOldData() {
 }
 
 // ===== PAYMENT =====
+
 // ── SMS ref already used check ──
 export async function getSmsPaymentByRef(refNo) {
   const res = await query(`
@@ -729,17 +726,15 @@ export async function saveScreenshotPayment(telegramId, refNo, type, description
 }
 
 // ===== FUZZY REF MATCH =====
-function fuzzyRefMatch(ref1, ref2) {{
+function fuzzyRefMatch(ref1, ref2) {
   if (!ref1 || !ref2) return false;
   if (ref1 === ref2) return true;
 
   const r1 = ref1.toUpperCase();
   const r2 = ref2.toUpperCase();
 
-  // Length ለየት ቢል reject
   if (r1.length !== r2.length) return false;
 
-  // የሚምታቱ characters
   const knownConfusions = [
     ['5', 'S'],
     ['0', 'O'],
@@ -764,10 +759,6 @@ function fuzzyRefMatch(ref1, ref2) {{
       unknownErrors++;
     }
 
-    // ህጎች:
-    // 1 known + 1 unknown → ❌
-    // 2 unknown → ❌
-    // 3+ ምንም → ❌
     if (unknownErrors >= 1 && knownErrors >= 1) return false;
     if (unknownErrors >= 2) return false;
     if (knownErrors > 2) return false;
@@ -795,7 +786,6 @@ export async function tryMatch({ refNo, amount, type, telegramId }) {
 
   console.log(`[DB] tryMatch — SMS rows: ${sms.rows.length} | Screenshot rows: ${screenshot.rows.length}`);
 
-  // Fuzzy match SMS vs Screenshot
   for (const s of sms.rows) {
     for (const sc of screenshot.rows) {
       if (fuzzyRefMatch(s.ref_no, sc.ref_no)) {
