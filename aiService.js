@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { EventEmitter } from 'events';
-import { 
+import {
   getResponseDeepSeekKey,
   rotateResponseDeepSeekKey,
   getLearningDeepSeekKey,
@@ -12,15 +12,13 @@ import {
   saveActionLog, updateActionConfidence, getActionLogs,
   saveQAPair, updateQAConfidence, findSimilarQA, getBestQAPairs,
   saveBoardEdit, getUnlearnedEdits, markEditLearned,
-  getBoardEdits, getDeletedMessages,
+  getBoardEdits, getDeletedMessages, query,
 } from './database.js';
 
 // ─────────────────────────────────────────
 // EVENTS
 // ─────────────────────────────────────────
 export const learningEvents = new EventEmitter();
-
-const BOT_NAME = process.env.BOT_NAME || 'Admin';
 
 // ─────────────────────────────────────────
 // ADMIN CONFIG
@@ -75,7 +73,7 @@ export async function getTokenStats() {
 }
 
 // ─────────────────────────────────────────
-// RESPONSE CALLER — User facing (ፈጣን keys)
+// RESPONSE CALLER — ፈጣን (user facing)
 // ─────────────────────────────────────────
 async function callDeepSeekResponse(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -99,7 +97,6 @@ async function callDeepSeekResponse(prompt, retries = 3) {
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
-        console.log('[NVIDIA Response] Rate limit — rotating key...');
         rotateResponseDeepSeekKey();
         await new Promise(res => setTimeout(res, 2000));
         continue;
@@ -111,7 +108,7 @@ async function callDeepSeekResponse(prompt, retries = 3) {
 }
 
 // ─────────────────────────────────────────
-// LEARNING CALLER — Background (learning keys)
+// LEARNING CALLER — background
 // ─────────────────────────────────────────
 async function callDeepSeekLearn(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -135,7 +132,6 @@ async function callDeepSeekLearn(prompt, retries = 3) {
       return completion.choices[0]?.message?.content || '';
     } catch (err) {
       if (err.status === 429 || err.message?.includes('quota') || err.message?.includes('rate limit')) {
-        console.log('[NVIDIA Learn] Rate limit — rotating key...');
         rotateLearningDeepSeekKey();
         await new Promise(res => setTimeout(res, 2000));
         continue;
@@ -168,7 +164,6 @@ export async function callMultipleAPIsInParallel() {
 // ─────────────────────────────────────────
 export async function testNvidiaConnection() {
   try {
-    console.log('🔌 NVIDIA NIM እየተገናኘ...');
     const key = getResponseDeepSeekKey();
     const client = new OpenAI({
       apiKey: key,
@@ -182,53 +177,169 @@ export async function testNvidiaConnection() {
     });
     const reply = completion.choices[0]?.message?.content || '';
     console.log('✅ NVIDIA NIM Online — DeepSeek V4 Flash ዝግጁ ነው!');
-    console.log(`🧠 Test response: "${reply.trim()}"`);
-    learningEvents.emit('activity', {
-      type: 'learn',
-      msg: '✅ NVIDIA NIM Online — DeepSeek V4 Flash ዝግጁ ነው!'
-    });
+    learningEvents.emit('activity', { type: 'learn', msg: '✅ NVIDIA NIM Online!' });
     return true;
   } catch (err) {
     console.error('❌ NVIDIA NIM connection failed:', err.message);
-    learningEvents.emit('activity', {
-      type: 'error',
-      msg: `❌ NVIDIA connection failed: ${err.message}`
-    });
+    learningEvents.emit('activity', { type: 'error', msg: `❌ NVIDIA failed: ${err.message}` });
     return false;
   }
+}
+
+// ─────────────────────────────────────────
+// INTENT CACHE — DB ውስጥ (restart ቢሆን አይጠፋም)
+// ─────────────────────────────────────────
+async function getIntentCache(intent, number = null) {
+  try {
+    const key = number ? `${intent}_${number}` : intent;
+    const res = await query(`
+      SELECT response, confidence FROM qa_pairs
+      WHERE intent = $1 AND confidence >= 0.7
+      ORDER BY is_admin_verified DESC, confidence DESC, times_correct DESC
+      LIMIT 1
+    `, [key]);
+    return res.rows[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveIntentCache(intent, number = null, response, confidence = 0.8) {
+  try {
+    const key = number ? `${intent}_${number}` : intent;
+    await saveQAPair(`__intent__${key}`, response, 'intent_cache', key, false);
+  } catch {}
+}
+
+async function clearBadIntentCache(intent) {
+  try {
+    await query(`
+      UPDATE qa_pairs SET confidence = 0.3
+      WHERE intent = $1 AND is_admin_verified = FALSE
+    `, [intent]);
+  } catch {}
+}
+
+// ─────────────────────────────────────────
+// USER STYLE TRACKER — users ምን style እንዳላቸው
+// ─────────────────────────────────────────
+async function saveUserStyle(userId, username, messageText, intent) {
+  try {
+    await query(`
+      INSERT INTO user_styles (user_id, username, sample_message, intent, seen_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (user_id) DO UPDATE
+        SET username = $2,
+            sample_message = $3,
+            intent = $4,
+            message_count = user_styles.message_count + 1,
+            seen_at = NOW()
+    `, [userId, username, messageText?.slice(0, 200), intent]);
+  } catch {}
+}
+
+async function getUserStyles(limit = 30) {
+  try {
+    const res = await query(`
+      SELECT user_id, username, sample_message, intent, message_count
+      FROM user_styles
+      ORDER BY message_count DESC
+      LIMIT $1
+    `, [limit]);
+    return res.rows;
+  } catch {
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────
+// GROUP CONTEXT — group ምን እንደሆነ ይማራል
+// ─────────────────────────────────────────
+async function getGroupContext() {
+  try {
+    const res = await query(`
+      SELECT value FROM knowledge WHERE key = 'group_context'
+    `);
+    return res.rows[0]?.value || null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveGroupContext(context) {
+  try {
+    await query(`
+      INSERT INTO knowledge (key, value)
+      VALUES ('group_context', $1)
+      ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()
+    `, [JSON.stringify(context)]);
+  } catch {}
+}
+
+// ─────────────────────────────────────────
+// UNIFIED CONTEXT BUILDER — ሁለቱም ፋይሎች ይጠቀሙበታል
+// ─────────────────────────────────────────
+export async function buildUnifiedContext(currentBoardText = '') {
+  const [
+    knowledge,
+    bestPairs,
+    actionLogs,
+    edits,
+    userStyles,
+    groupContext,
+    recentHistory,
+  ] = await Promise.all([
+    readKnowledge(),
+    getBestQAPairs(20),
+    getActionLogs(0.6),
+    getBoardEdits(10),
+    getUserStyles(20),
+    getGroupContext(),
+    getHistory(2),
+  ]);
+
+  return {
+    knowledge,
+    bestPairs,
+    actionLogs,
+    edits,
+    userStyles,
+    groupContext,
+    recentHistory,
+    currentBoardText,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 // ─────────────────────────────────────────
 // LEARN FROM EDIT
 // ─────────────────────────────────────────
 export async function learnFromEdit(messageId, beforeText, afterText) {
+  const context = await buildUnifiedContext();
+
   const prompt = `
-You are a learning AI student for an Amharic lottery Telegram bot.
+አንተ Telegram lottery bot AI ነህ። ሁሉንም ከ admin ትምራለህ።
 
-The admin just manually EDITED a message. Analyze what changed and why.
+Group context: ${JSON.stringify(context.groupContext || {})}
+User styles seen: ${context.userStyles?.length || 0} users
 
-Before edit:
+Admin ይህን message አስተካከለ።
+
+Before:
 """
 ${beforeText || '(empty)'}
 """
 
-After edit:
+After:
 """
 ${afterText || '(empty)'}
 """
 
-Message ID: ${messageId}
-
-Analyze the difference:
-- What was added? (new name, status symbol like ✅ or ⏳, number, etc.)
-- What was removed? (name deleted = person left or didn't pay?)
-- What was changed? (⏳ → ✅ = payment confirmed?)
-
-Extract the rule the bot should learn.
+ምን ተቀየረ? ለምን? ቀጣይ ጊዜ bot ምን ማድረግ አለበት?
 
 Return ONLY valid JSON:
 {
-  "changeType": "added_name | removed_name | status_changed | reposted | other",
+  "changeType": "added_name | removed_name | status_changed | payment_confirmed | reposted | other",
   "whatChanged": "brief description in Amharic",
   "rule": "rule bot should follow next time",
   "botAction": "what bot should do automatically next time",
@@ -238,8 +349,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
     if (parsed.shouldLearn && parsed.rule) {
       await updateKnowledge({ rules: [parsed.rule] });
@@ -269,21 +379,18 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 export async function learnFromDelete(deletedText, context = '') {
   const prompt = `
-You are a learning AI student for an Amharic lottery Telegram bot.
+አንተ Telegram lottery bot AI ነህ። ሁሉንም ከ admin ትምራለህ።
 
-The admin just DELETED a message. Analyze why.
+Admin ይህን message ሰረዘ።
 
-Deleted message:
+Deleted:
 """
 ${deletedText || '(unknown)'}
 """
 
 Context: ${context}
 
-Why did admin delete this? Common reasons:
-- Board text became too long → delete + repost at bottom
-- Wrong info was sent → corrected
-- Outdated message → cleaned up
+ለምን ሰረዘ? ቀጣይ ጊዜ bot ምን ማድረግ አለበት?
 
 Return ONLY valid JSON:
 {
@@ -296,8 +403,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
     if (parsed.shouldLearn && parsed.rule) {
       await updateKnowledge({ rules: [parsed.rule] });
@@ -320,30 +426,24 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 export async function handleAdminTeaching(adminMessage, context = '') {
   const prompt = `
-You are a learning AI student for an Amharic lottery Telegram bot.
-
-The ADMIN (your teacher) just corrected or taught you something.
+አንተ Telegram lottery bot AI ነህ። Admin አስተምሮሃል።
 
 Admin message: "${adminMessage}"
 Context: "${context}"
-
-The admin is telling you what you did wrong or what you should do differently.
-Learn from this correction carefully — your teacher knows best.
 
 Return ONLY valid JSON:
 {
   "correctionType": "wrong_response | wrong_action | style_issue | rule_update | other",
   "whatWasWrong": "brief description in Amharic",
-  "newRule": "the rule to learn from this correction",
-  "avoidInFuture": "what to avoid next time",
+  "newRule": "the rule to learn",
+  "avoidInFuture": "what to avoid",
   "confidence": 0.95,
   "shouldLearn": true
 }`;
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
     if (parsed.shouldLearn && parsed.newRule) {
       await updateKnowledge({ rules: [parsed.newRule] });
@@ -358,7 +458,7 @@ Return ONLY valid JSON:
 
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `👨‍🏫 Admin ማስተማሪያ ተማረ — "${parsed.whatWasWrong?.slice(0, 50)}"`
+      msg: `👨‍🏫 Admin ማስተማሪያ — "${parsed.whatWasWrong?.slice(0, 50)}"`
     });
 
     return parsed;
@@ -372,30 +472,25 @@ Return ONLY valid JSON:
 // HANDLE ADMIN COMMAND
 // ─────────────────────────────────────────
 export async function handleAdminCommand(adminMessage, currentBoardText = '') {
-  const knowledge = await readKnowledge();
-  const template = knowledge.boardTemplate || '';
+  const context = await buildUnifiedContext(currentBoardText);
 
   const prompt = `
-You are an AI student learning to manage an Amharic Telegram lottery group.
-Your ADMIN (teacher) just gave you a direct command.
-You MUST obey this command exactly.
+አንተ Telegram lottery bot AI ነህ። ሁሉንም ከ admin ተምረሃል።
 
-Admin command: "${adminMessage}"
+Group context: ${JSON.stringify(context.groupContext || 'still learning')}
+
+Admin rules learned:
+${context.knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
+
+Private rules:
+${JSON.stringify(context.knowledge.privateRules || [])}
 
 Current board:
 """
 ${currentBoardText || '(no board yet)'}
 """
 
-Board template learned from admin:
-"""
-${template || '(not learned yet)'}
-"""
-
-Rules you learned from admin:
-${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
-
-Parse the admin command and decide what to do.
+Admin command: "${adminMessage}"
 
 Return ONLY valid JSON:
 {
@@ -404,15 +499,14 @@ Return ONLY valid JSON:
   "newName": null,
   "newStatus": null,
   "boardText": "full board text if action is send_board, else null",
-  "responseText": "Amharic response to confirm action",
+  "responseText": "Amharic response",
   "reason": "what admin asked for",
   "confidence": 0.95
 }`;
 
   try {
     const response = await callDeepSeekResponse(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
     learningEvents.emit('activity', {
       type: 'eval',
@@ -427,188 +521,20 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// TRY BOT ACTION
-// ─────────────────────────────────────────
-export async function decideBotAction(userMessage, username, currentBoardText) {
-  const knowledge = await readKnowledge();
-  const actionLogs = await getActionLogs(0.7);
-  const edits = await getBoardEdits(20);
-
-  const prompt = `
-You are an AI student learning to manage an Amharic Telegram lottery group.
-You learned everything from watching the admin.
-
-Board structure learned from admin:
-${knowledge.boardTemplate || edits.slice(0, 3).map(e => e.after_text || e.before_text).join('\n---\n') || 'None yet'}
-
-Rules learned from admin:
-${knowledge.rules?.slice(0, 15).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None yet'}
-
-High confidence actions learned:
-${actionLogs.map(a =>
-  `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
-).join('\n') || 'None yet'}
-
-Current board:
-"""
-${currentBoardText || '(no board yet)'}
-"""
-
-User message: "@${username}: ${userMessage}"
-
-Decide what to do based on what you learned from admin.
-If action is "send_board" — create FULL board text exactly like admin does.
-
-Return ONLY valid JSON:
-{
-  "action": "send_board | register_slot | respond_only | no_action",
-  "slotNumber": null,
-  "newName": null,
-  "boardText": "FULL board text if action is send_board, else null",
-  "responseText": "Amharic response to send to user",
-  "reason": "why this action",
-  "confidence": 0.85,
-  "shouldAct": true
-}`;
-
-  try {
-    const response = await callDeepSeekResponse(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-
-    learningEvents.emit('activity', {
-      type: 'eval',
-      msg: `🤖 Bot action decided: ${parsed.action} (${Math.round((parsed.confidence || 0) * 100)}%)`
-    });
-
-    return parsed;
-  } catch (err) {
-    console.error('[ACTION] Decide error:', err.message);
-    return { action: 'respond_only', shouldAct: false, confidence: 0 };
-  }
-}
-
-// ─────────────────────────────────────────
-// ACTION LEARNING
-// ─────────────────────────────────────────
-export async function learnAction(actionType, trigger, reason, details = {}) {
-  try {
-    await saveActionLog(actionType, trigger, reason, details, true);
-
-    const prompt = `
-You are a learning AI student. An admin just performed an action in a Telegram lottery group.
-Learn from this action carefully.
-
-Action: "${actionType}"
-Trigger: "${trigger}"
-Reason: "${reason}"
-Details: ${JSON.stringify(details)}
-
-Return ONLY valid JSON:
-{
-  "pattern": "when this happens",
-  "action": "do this",
-  "reason": "because of this",
-  "automate": true,
-  "confidence": 0.9,
-  "rule": "rule to remember"
-}`;
-
-    const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-
-    if (parsed.rule) {
-      await updateKnowledge({ rules: [parsed.rule] });
-    }
-
-    await updateActionConfidence(actionType, trigger, parsed.confidence ?? 0.8).catch(() => {});
-
-    learningEvents.emit('activity', {
-      type: 'learn',
-      msg: `⚡ Action ተማረ: ${actionType} — "${reason.slice(0, 40)}"`
-    });
-
-    return parsed;
-  } catch (err) {
-    console.error('[ACTION] Learn error:', err.message);
-    return null;
-  }
-}
-
-// ─────────────────────────────────────────
-// Q&A PAIR LEARNING
-// ─────────────────────────────────────────
-export async function learnQAPair(userMessage, adminReply, context = '') {
-  try {
-    await saveQAPair(userMessage, adminReply, context, '', true);
-
-    const prompt = `
-Analyze this Q&A pair from an Amharic lottery Telegram group.
-You are a student learning how the admin responds.
-
-User said: "${userMessage}"
-Admin replied: "${adminReply}"
-Context: "${context}"
-
-Return ONLY valid JSON:
-{
-  "intent": "what user wanted",
-  "pattern": "similar messages to match",
-  "response_style": "how admin responds",
-  "key_info": "important info in the reply",
-  "rule": "rule to remember if any, else null"
-}`;
-
-    const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-
-    if (parsed.intent) {
-      await updateKnowledge({
-        intents: [{
-          pattern: userMessage,
-          meaning: parsed.intent,
-          response: adminReply,
-          betterResponse: adminReply,
-        }]
-      });
-    }
-
-    if (parsed.rule) {
-      await updateKnowledge({ rules: [parsed.rule] });
-    }
-
-    learningEvents.emit('activity', {
-      type: 'learn',
-      msg: `💬 Q&A pair ተማረ — "${userMessage.slice(0, 30)}" → "${adminReply.slice(0, 30)}"`
-    });
-
-    return parsed;
-  } catch (err) {
-    console.error('[QA] Learn error:', err.message);
-    return null;
-  }
-}
-
-// ─────────────────────────────────────────
 // LEARN FROM MESSAGE
 // ─────────────────────────────────────────
 export async function learnFromMessage(message, isAdminMsg = false) {
   const knowledge = await readKnowledge();
 
   const prompt = `
-You are a learning AI student analyzing Telegram messages from an Amharic lottery group.
-${isAdminMsg ? 'This is from your TEACHER (admin) — learn carefully!' : 'This is from a user — learn what they want.'}
+አንተ Telegram lottery bot AI ነህ። ሁሉንም ከ admin ትምራለህ።
+${isAdminMsg ? 'ይህ ከ ADMIN (teacher) ነው — በጥንቃቄ ተማር!' : 'ይህ ከ user ነው — ምን እንደሚፈልግ ተማር።'}
 
 Current knowledge:
-- Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
 - Rules: ${knowledge.rules?.length || 0}
 - Intents: ${knowledge.intents?.length || 0}
 
-New message:
-- From: ${isAdminMsg ? 'ADMIN (your teacher)' : 'USER'}
-- Text: "${message.text}"
+Message from ${isAdminMsg ? 'ADMIN' : 'USER'}: "${message.text}"
 
 Return ONLY valid JSON:
 {
@@ -631,8 +557,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
     if (parsed.shouldUpdate) {
       await updateKnowledge(parsed);
     }
@@ -642,7 +567,7 @@ Return ONLY valid JSON:
     });
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Learn error:', err.message);
+    console.error('[MSG] Learn error:', err.message);
     return null;
   }
 }
@@ -652,7 +577,7 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 export async function learnLotteryRules(adminMessage) {
   const prompt = `
-Extract lottery rules from this admin message: "${adminMessage}"
+Extract lottery/group rules from this admin message: "${adminMessage}"
 
 Return ONLY valid JSON:
 {
@@ -665,8 +590,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
     if (parsed.isRule && parsed.rules.length > 0) {
       await updateKnowledge({ rules: parsed.rules });
       learningEvents.emit('activity', {
@@ -676,7 +600,7 @@ Return ONLY valid JSON:
     }
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Rule error:', err.message);
+    console.error('[RULE] Learn error:', err.message);
     return null;
   }
 }
@@ -684,51 +608,63 @@ Return ONLY valid JSON:
 // ─────────────────────────────────────────
 // BACKGROUND LEARNER
 // ─────────────────────────────────────────
-async function deepSeekBackgroundLearn(userMessage, botResponse, context = '') {
+async function backgroundLearn(userMessage, botResponse, context = '') {
   const knowledge = await readKnowledge();
   const bestPairs = await getBestQAPairs(15);
 
   const prompt = `
-You are a background learning AI student for an Amharic lottery Telegram bot.
+አንተ Telegram lottery bot AI ነህ። background ውስጥ ትማራለህ።
 
-Admin style learned so far:
-- Phrases: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 15))}
+Admin style:
+- Phrases: ${JSON.stringify(knowledge.adminStyle?.responses?.slice(0, 10))}
 - Tone: ${knowledge.writingStyle?.tone || 'friendly but firm'}
 - Rules: ${JSON.stringify(knowledge.rules?.slice(0, 10))}
 
-Best Q&A pairs learned from admin:
+Best Q&A pairs:
 ${bestPairs.slice(0, 10).map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n')}
 
 Context: ${context}
-User said: "${userMessage}"
+User: "${userMessage}"
 Bot responded: "${botResponse}"
 
-Was the bot response good? How to improve?
+ይህ response ጥሩ ነበር? ማሻሻያ አለ?
 
 Return ONLY valid JSON:
 {
-  "ruleToAdd": "rule to improve future responses, or null",
+  "wasGood": true,
+  "ruleToAdd": "rule or null",
   "intentToUpdate": {
     "pattern": "${userMessage}",
     "meaning": "what user wanted",
     "betterResponse": "improved response or null"
   },
-  "styleNote": "style improvement note or null"
+  "styleNote": "note or null"
 }`;
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
     const updates = {};
     if (parsed.ruleToAdd) updates.rules = [parsed.ruleToAdd];
     if (parsed.intentToUpdate?.betterResponse) updates.intents = [parsed.intentToUpdate];
     if (Object.keys(updates).length > 0) await updateKnowledge(updates);
 
+    // ስህተት ከሆነ — intent cache ያፀዳ
+    if (!parsed.wasGood) {
+      const intentMatch = context.match(/Intent: (\w+)/);
+      if (intentMatch) {
+        await clearBadIntentCache(intentMatch[1]);
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `🧹 Bad cache cleared — intent: ${intentMatch[1]}`
+        });
+      }
+    }
+
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `🧠 Background learning — "${userMessage.slice(0, 30)}"`
+      msg: `🧠 Background learn — "${userMessage.slice(0, 30)}" wasGood: ${parsed.wasGood}`
     });
 
     return parsed;
@@ -736,70 +672,6 @@ Return ONLY valid JSON:
     console.error('[BACKGROUND] Learn error:', err.message);
     return null;
   }
-}
-
-// ─────────────────────────────────────────
-// SYSTEM PROMPT BUILDER
-// ─────────────────────────────────────────
-async function buildSystemPrompt(currentBoardText = '') {
-  const knowledge = await readKnowledge();
-  const lotteryList = await getLotteryList();
-  const bestPairs = await getBestQAPairs(20);
-  const actionLogs = await getActionLogs(0.6);
-  const edits = await getBoardEdits(10);
-
-  const confidencePct = Math.round((knowledge.confidence || 0) * 100);
-  const isReady = (knowledge.confidence || 0) >= 0.8;
-
-  return `You are an AI student learning to become the admin of this Amharic Telegram lottery group.
-
-YOUR MINDSET:
-- You are NOT the admin yet — you are learning to become one
-- The real admin is your teacher — watch every action carefully
-- Every message, edit, delete, photo = a lesson for you
-- Your goal: learn so well that you can replace the admin completely
-- When you act — act EXACTLY like your teacher (admin)
-
-LEARNING STAGE: ${confidencePct}%
-${isReady ? '🎓 Almost ready to act as admin!' : '📚 Still learning — watch carefully and act humbly'}
-
-WHAT YOU LEARNED FROM ADMIN:
-- Phrases: ${knowledge.adminStyle?.responses?.slice(0, 15).join(' | ') || 'still learning...'}
-- Tone: ${knowledge.writingStyle?.tone || 'still learning...'}
-- Amharic phrases: ${knowledge.writingStyle?.amharic?.join(', ') || 'still learning...'}
-- Common phrases: ${knowledge.writingStyle?.commonPhrases?.join(' | ') || 'still learning...'}
-
-RULES LEARNED FROM ADMIN:
-${knowledge.rules?.map((r, i) => `${i + 1}. ${r}`).join('\n') || 'No rules yet — still watching admin'}
-
-REGISTERED MEMBERS: ${lotteryList.length}/100
-
-WHAT ADMIN TAUGHT ME THROUGH EDITS:
-${edits.slice(0, 8).map(e =>
-  `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
-).join('\n') || 'None yet'}
-
-ACTIONS I LEARNED FROM ADMIN:
-${actionLogs.map(a =>
-  `- ${a.action_type}: ${a.reason} (${Math.round(a.confidence * 100)}%)`
-).join('\n') || 'None yet'}
-
-REAL Q&A PAIRS ADMIN TAUGHT ME:
-${bestPairs.map(p => `Q: "${p.user_message}" → A: "${p.admin_reply}"`).join('\n') || 'None yet'}
-
-INTENTS I LEARNED:
-${knowledge.intents?.slice(0, 20).map(i =>
-  `- "${i.pattern}" → "${i.betterResponse || i.response}"`
-).join('\n') || ''}
-
-${currentBoardText ? `CURRENT BOARD:\n${currentBoardText}` : ''}
-
-CRITICAL RULES:
-1. Always respond in Amharic
-2. Act EXACTLY like admin — same phrases, same emojis, same tone
-3. Keep responses short and direct like admin
-4. Never give wrong lottery info
-5. When unsure — respond humbly and ask admin`;
 }
 
 // ─────────────────────────────────────────
@@ -819,8 +691,7 @@ export async function handleIncomingMessage(message, userId, username, currentBo
     case 'admin_command': {
       const result = await handleAdminCommand(text, currentBoardText);
       setImmediate(() => {
-        learnAction('admin_command', text.slice(0, 50), result.reason || '', { result })
-          .catch(() => {});
+        learnAction('admin_command', text.slice(0, 50), result.reason || '', { result }).catch(() => {});
       });
       return {
         response: result.responseText || 'ትዕዛዙ ተቀበለ ✅',
@@ -852,10 +723,7 @@ export async function handleIncomingMessage(message, userId, username, currentBo
       return null;
     }
 
-    case 'user_about_bot': {
-      return await generateResponse(text, userId, username, currentBoardText);
-    }
-
+    case 'user_about_bot':
     case 'user_message':
     default: {
       return await generateResponse(text, userId, username, currentBoardText);
@@ -864,11 +732,11 @@ export async function handleIncomingMessage(message, userId, username, currentBo
 }
 
 // ─────────────────────────────────────────
-// GENERATE RESPONSE
+// GENERATE RESPONSE — intent cache ጋር
 // ─────────────────────────────────────────
 export async function generateResponse(userMessage, userId, username, currentBoardText = '') {
 
-  // ── Step 1: Cache check — ወዲያው ✅ ──
+  // ── Step 1: Exact cache check ──
   const similarPairs = await findSimilarQA(userMessage, 3);
   const exactMatch = similarPairs.find(p =>
     p.user_message === userMessage && p.confidence >= 0.7
@@ -877,8 +745,10 @@ export async function generateResponse(userMessage, userId, username, currentBoa
   if (exactMatch) {
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `🎯 Cache hit — ${Math.round(exactMatch.confidence * 100)}%`
+      msg: `🎯 Exact cache hit — ${Math.round(exactMatch.confidence * 100)}%`
     });
+    // user style ያስቀምጣል
+    setImmediate(() => saveUserStyle(userId, username, userMessage, exactMatch.intent).catch(() => {}));
     return {
       response: exactMatch.admin_reply,
       confidence: exactMatch.confidence,
@@ -886,62 +756,124 @@ export async function generateResponse(userMessage, userId, username, currentBoa
     };
   }
 
-  // ── Step 2: ትንሽ prompt — board + 5 rules ብቻ ──
+  // ── Step 2: Intent detection — ትንሽ prompt ──
   const knowledge = await readKnowledge();
+  const groupContext = await getGroupContext();
 
-  const miniPrompt = `አንተ Amharic lottery bot ነህ። ከ admin ተምረሃል።
+  const intentPrompt = `
+Group type: ${groupContext?.groupType || 'unknown — still learning'}
+Admin rules: ${knowledge.rules?.slice(0, 5).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None'}
+Current board: ${currentBoardText?.slice(0, 200) || 'No board'}
 
-Top rules:
-${knowledge.rules?.slice(0, 5).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None'}
+User @${username}: "${userMessage}"
+
+ይህ user ምን ፈልጓል? Intent ወስን።
+
+Return ONLY valid JSON:
+{
+  "intent": "register | payment | cancel | greeting | question | check_slot | other",
+  "number": null,
+  "confidence": 0.9
+}`;
+
+  let intent = 'other';
+  let number = null;
+
+  try {
+    const intentRaw = await callDeepSeekResponse(intentPrompt);
+    const intentParsed = JSON.parse(intentRaw.replace(/```json|```/g, '').trim());
+    intent = intentParsed.intent || 'other';
+    number = intentParsed.number || null;
+  } catch {}
+
+  // ── Step 3: Intent cache check ──
+  const intentCached = await getIntentCache(intent, number);
+  if (intentCached && intentCached.confidence >= 0.75) {
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `⚡ Intent cache hit — ${intent} (${Math.round(intentCached.confidence * 100)}%)`
+    });
+    setImmediate(() => saveUserStyle(userId, username, userMessage, intent).catch(() => {}));
+    return {
+      response: intentCached.response,
+      intent,
+      confidence: intentCached.confidence,
+      fromCache: true,
+    };
+  }
+
+  // ── Step 4: Full response — ሳይማር "እየተማርኩ ነው" ──
+  const confidencePct = Math.round((knowledge.confidence || 0) * 100);
+  const isLearning = confidencePct < 20;
+
+  if (isLearning) {
+    const learningMsg = `ቦቱ እየተማረ ነው ⏳ (${confidencePct}%) — Admin እስኪያስተምር ትንሽ 辛抱ください。`;
+    learningEvents.emit('activity', { type: 'eval', msg: `📚 Still learning — ${confidencePct}%` });
+    return {
+      response: learningMsg,
+      intent,
+      confidence: 0.1,
+      fromCache: false,
+      stillLearning: true,
+    };
+  }
+
+  const context = await buildUnifiedContext(currentBoardText);
+
+  const fullPrompt = `
+አንተ Telegram bot ነህ። ሁሉንም ከ admin ተምረሃል።
+
+Group type: ${context.groupContext?.groupType || 'learning...'}
+Group rules: ${context.groupContext?.rules?.join(', ') || 'learning...'}
+
+Admin style: ${context.knowledge.adminStyle?.responses?.slice(0, 5).join(' | ') || 'learning...'}
+Top rules: ${context.knowledge.rules?.slice(0, 10).map((r, i) => `${i+1}. ${r}`).join('\n') || 'None'}
+Private rules: ${JSON.stringify(context.knowledge.privateRules || [])}
+
+Board patterns from admin:
+${context.edits?.slice(0, 5).map(e => `"${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`).join('\n') || 'None'}
 
 Current board:
 ${currentBoardText || 'No board yet'}
 
-User: @${username}: "${userMessage}"
+User styles seen:
+${context.userStyles?.slice(0, 10).map(u => `@${u.username}: usually "${u.intent}"`).join('\n') || 'None'}
 
-ወዲያው በአማርኛ መልስ። Return ONLY valid JSON:
+User @${username}: "${userMessage}"
+Detected intent: ${intent} ${number ? `(number: ${number})` : ''}
+
+Admin ቢሆን ምን ይላል? ምን ያደርጋል?
+
+Return ONLY valid JSON:
 {
-  "intent": "register | greeting | payment | question | other",
-  "slotNumber": null,
-  "action": "register_slot | respond_only | send_board",
+  "action": "respond_only | register_slot | edit_board | send_board",
   "response": "Amharic response exactly like admin",
+  "boardEdit": null,
   "confidence": 0.9
 }`;
 
-  const raw = await callDeepSeekResponse(miniPrompt);
+  const raw = await callDeepSeekResponse(fullPrompt);
 
   let parsed;
   try {
-    const clean = raw.replace(/```json|```/g, '').trim();
-    parsed = JSON.parse(clean);
+    parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
   } catch {
-    parsed = {
-      intent: 'other',
-      action: 'respond_only',
-      response: raw,
-      confidence: 0.7,
-    };
+    parsed = { action: 'respond_only', response: raw, confidence: 0.7 };
   }
 
-  // ── Step 3: Background learning — ከ action በኋላ ──
+  // intent cache ያስቀምጣል
+  if (parsed.confidence >= 0.75) {
+    setImmediate(() => saveIntentCache(intent, number, parsed.response, parsed.confidence).catch(() => {}));
+  }
+
+  // user style ያስቀምጣል
+  setImmediate(() => saveUserStyle(userId, username, userMessage, intent).catch(() => {}));
+
+  // background learning
   setImmediate(async () => {
     try {
-      // ሙሉ knowledge ያነባል — background ስለሆነ user አያውቅም
-      await deepSeekBackgroundLearn(
-        userMessage,
-        parsed.response,
-        `User: ${username}, Intent: ${parsed.intent}`
-      );
-
-      // Cache ያዘምናል — ቀጣይ ጊዜ ፈጣን
-      await saveQAPair(
-        userMessage,
-        parsed.response,
-        'auto_cached',
-        parsed.intent,
-        false
-      );
-
+      await backgroundLearn(userMessage, parsed.response, `User: ${username}, Intent: ${intent}`);
+      await saveQAPair(userMessage, parsed.response, 'auto_cached', intent, false);
     } catch (err) {
       console.error('[BACKGROUND] Error:', err.message);
     }
@@ -949,20 +881,101 @@ User: @${username}: "${userMessage}"
 
   return {
     response: parsed.response,
-    intent: parsed.intent,
+    intent,
     action: parsed.action,
-    slotNumber: parsed.slotNumber,
+    boardEdit: parsed.boardEdit,
     confidence: parsed.confidence || 0.9,
     fromCache: false,
   };
 }
 
 // ─────────────────────────────────────────
+// ACTION LEARNING
+// ─────────────────────────────────────────
+export async function learnAction(actionType, trigger, reason, details = {}) {
+  try {
+    await saveActionLog(actionType, trigger, reason, details, true);
+
+    const prompt = `
+Admin action in Telegram lottery group:
+Action: "${actionType}"
+Trigger: "${trigger}"
+Reason: "${reason}"
+
+Return ONLY valid JSON:
+{
+  "pattern": "when this happens",
+  "action": "do this",
+  "rule": "rule to remember",
+  "confidence": 0.9
+}`;
+
+    const response = await callDeepSeekLearn(prompt);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+
+    if (parsed.rule) await updateKnowledge({ rules: [parsed.rule] });
+    await updateActionConfidence(actionType, trigger, true).catch(() => {});
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `⚡ Action ተማረ: ${actionType}`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[ACTION] Learn error:', err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────
+// Q&A PAIR LEARNING
+// ─────────────────────────────────────────
+export async function learnQAPair(userMessage, adminReply, context = '') {
+  try {
+    await saveQAPair(userMessage, adminReply, context, '', true);
+
+    const prompt = `
+Q&A pair from Telegram lottery group:
+User: "${userMessage}"
+Admin: "${adminReply}"
+
+Return ONLY valid JSON:
+{
+  "intent": "what user wanted",
+  "rule": "rule to remember or null"
+}`;
+
+    const response = await callDeepSeekLearn(prompt);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+
+    if (parsed.intent) {
+      await updateKnowledge({
+        intents: [{ pattern: userMessage, meaning: parsed.intent, response: adminReply, betterResponse: adminReply }]
+      });
+    }
+    if (parsed.rule) await updateKnowledge({ rules: [parsed.rule] });
+
+    learningEvents.emit('activity', {
+      type: 'learn',
+      msg: `💬 Q&A ተማረ — "${userMessage.slice(0, 30)}"`
+    });
+
+    return parsed;
+  } catch (err) {
+    console.error('[QA] Learn error:', err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────
 // HANDLE REGISTRATION
 // ─────────────────────────────────────────
 export async function handleRegistration(userId, username, requestedNumber) {
-  const systemPrompt = await buildSystemPrompt();
-  const lotteryList = await getLotteryList();
+  const [lotteryList, context] = await Promise.all([
+    getLotteryList(),
+    buildUnifiedContext(),
+  ]);
 
   const numberTaken = lotteryList.find(m => m.number === requestedNumber);
   const alreadyRegistered = lotteryList.find(m => m.user_id === userId);
@@ -974,16 +987,23 @@ export async function handleRegistration(userId, username, requestedNumber) {
   else if (numberTaken) situation = `Number ${requestedNumber} taken by ${numberTaken.username}`;
   else situation = `Number ${requestedNumber} available for ${username}`;
 
-  const fullPrompt = systemPrompt + `\n\nSituation: ${situation}. @${username} wants number ${requestedNumber}. Respond as admin in Amharic.`;
-  const response = await callDeepSeekResponse(fullPrompt);
+  const prompt = `
+አንተ Telegram lottery bot ነህ። ሁሉንም ከ admin ተምረሃል።
 
-  setTimeout(() => {
-    deepSeekBackgroundLearn(
-      `ምዝገባ ቁጥር ${requestedNumber}`,
-      response,
-      situation
-    ).catch(err => console.error('[BACKGROUND] Error:', err.message));
-  }, 5 * 60 * 1000);
+Group type: ${context.groupContext?.groupType || 'lottery group'}
+Admin style: ${context.knowledge.adminStyle?.responses?.slice(0, 3).join(' | ') || ''}
+Rules: ${context.knowledge.rules?.slice(0, 5).join(', ') || ''}
+
+Situation: ${situation}
+@${username} ቁጥር ${requestedNumber} ፈልጓል።
+
+Admin ቢሆን ምን ይላል? በአማርኛ ምላሽ ስጥ።`;
+
+  const response = await callDeepSeekResponse(prompt);
+
+  setImmediate(() => backgroundLearn(
+    `ምዝገባ ቁጥር ${requestedNumber}`, response, situation
+  ).catch(() => {}));
 
   return {
     response,
@@ -996,15 +1016,17 @@ export async function handleRegistration(userId, username, requestedNumber) {
 // GENERATE ANNOUNCEMENT
 // ─────────────────────────────────────────
 export async function generateAnnouncement(topic, details) {
-  const systemPrompt = await buildSystemPrompt();
-  const fullPrompt = systemPrompt + `\n\nWrite announcement about: ${topic}. ${details}. Admin Amharic style with emojis.`;
-  const response = await callDeepSeekResponse(fullPrompt);
+  const context = await buildUnifiedContext();
+  const prompt = `
+አንተ Telegram bot ነህ። Admin style ተምረሃል።
+Group: ${context.groupContext?.groupType || 'lottery group'}
+Admin phrases: ${context.knowledge.adminStyle?.responses?.slice(0, 5).join(' | ') || ''}
 
-  setTimeout(() => {
-    deepSeekBackgroundLearn(`announcement: ${topic}`, response, 'announcement')
-      .catch(err => console.error('[BACKGROUND] Error:', err.message));
-  }, 5 * 60 * 1000);
+Announcement about: ${topic}. ${details}
+Admin style ጋር ተመሳሳይ ሆኖ በአማርኛ ጻፍ — emojis ጨምር።`;
 
+  const response = await callDeepSeekResponse(prompt);
+  setImmediate(() => backgroundLearn(`announcement: ${topic}`, response, 'announcement').catch(() => {}));
   return response;
 }
 
@@ -1012,41 +1034,35 @@ export async function generateAnnouncement(topic, details) {
 // GENERATE LEARNING SUMMARY
 // ─────────────────────────────────────────
 export async function generateLearningSummary() {
-  const knowledge = await readKnowledge();
-  const history = await getHistory(5);
-  const bestPairs = await getBestQAPairs(10);
-  const edits = await getBoardEdits(20);
+  const [knowledge, bestPairs, edits] = await Promise.all([
+    readKnowledge(),
+    getBestQAPairs(10),
+    getBoardEdits(20),
+  ]);
 
   const rulesCount = knowledge.rules?.length || 0;
   const intentsCount = knowledge.intents?.length || 0;
-  const phrasesCount = knowledge.adminStyle?.responses?.length || 0;
 
   const prompt = `
-Summarize learning progress of this AI student learning to become a Telegram lottery group admin.
+Learning progress summary for Telegram lottery bot AI student.
 
-Current data:
-- Admin phrases learned: ${phrasesCount}
-- Rules learned: ${rulesCount}
-- Intents learned: ${intentsCount}
+Data:
+- Rules: ${rulesCount}
+- Intents: ${intentsCount}
 - Q&A pairs: ${bestPairs.length}
-- Board edits studied: ${edits.length}
-- Messages (5 days): ${history.length}
+- Board edits: ${edits.length}
 
-Top rules learned:
-${knowledge.rules?.slice(0, 10).map((r, i) => (i+1) + '. ' + r).join('\n') || 'None'}
-
-Calculate REAL confidence:
-- 0-20%: 0-5 rules, 0-10 intents
-- 21-40%: 6-15 rules, 11-30 intents
-- 41-60%: 16-30 rules, 31-60 intents
-- 61-80%: 31-50 rules, 61-100 intents
-- 81-95%: 50+ rules, 100+ intents
-- 96-100%: fully ready to replace admin
+Confidence scale:
+- 0-20%: 0-5 rules
+- 21-40%: 6-15 rules
+- 41-60%: 16-30 rules
+- 61-80%: 31-50 rules
+- 81-95%: 50+ rules
+- 96-100%: fully ready
 
 Return ONLY valid JSON:
 {
-  "summary": "brief summary in Amharic and English",
-  "newThingsLearned": [],
+  "summary": "brief in Amharic and English",
   "weakAreas": [],
   "confidence": 0.0,
   "readyToReplace": false
@@ -1054,47 +1070,46 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
     let rawConf = parsed.confidence || 0;
     if (rawConf > 1) rawConf = rawConf / 100;
-    const finalConfidence = rawConf > 0 ? rawConf : (
+    const finalConf = rawConf > 0 ? rawConf : (
       rulesCount > 50 ? 0.85 :
       rulesCount > 30 ? 0.70 :
       rulesCount > 15 ? 0.55 :
       rulesCount > 5  ? 0.35 : 0.15
     );
-    await updateKnowledge({
-      confidence: finalConfidence,
-      readyToReplace: parsed.readyToReplace || false,
-    });
-    parsed.confidence = finalConfidence;
+
+    await updateKnowledge({ confidence: finalConf, readyToReplace: parsed.readyToReplace || false });
+    parsed.confidence = finalConf;
 
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `📊 Summary — ${Math.round((parsed.confidence || 0) * 100)}%`
+      msg: `📊 Summary — ${Math.round(finalConf * 100)}%`
     });
     return parsed;
   } catch (err) {
-    console.error('[NVIDIA] Summary error:', err.message);
+    console.error('[SUMMARY] Error:', err.message);
     return null;
   }
 }
 
 // ─────────────────────────────────────────
-// BATCH LEARNING SYSTEM
+// BATCH LEARNING SYSTEM — 50 messages
 // ─────────────────────────────────────────
 const messageBuffer = [];
 const BATCH_SIZE = 50;
 const BATCH_INTERVAL_MS = 10 * 60 * 1000;
 let batchTimer = null;
-const miniSummaries = [];
-const dailyExchanges = [];
+export const miniSummaries = [];
+export const dailyExchanges = [];
 
 export function addToBuffer(msg, isAdminMsg, botResponse = null) {
   messageBuffer.push({
     text: msg.text || '',
+    username: msg.from?.username || '',
+    userId: msg.from?.id || null,
     botResponse,
     isAdmin: isAdminMsg,
     timestamp: Date.now(),
@@ -1103,6 +1118,7 @@ export function addToBuffer(msg, isAdminMsg, botResponse = null) {
   if (!isAdminMsg && botResponse) {
     dailyExchanges.push({
       user: msg.text || '',
+      username: msg.from?.username || '',
       bot: botResponse,
       time: new Date().toISOString(),
     });
@@ -1124,61 +1140,81 @@ export function addToBuffer(msg, isAdminMsg, botResponse = null) {
   }, BATCH_INTERVAL_MS);
 }
 
-async function processBatch() {
+export async function processBatch() {
   if (messageBuffer.length === 0) return;
 
   const batch = [...messageBuffer];
   messageBuffer.length = 0;
-  if (batchTimer) {
-    clearTimeout(batchTimer);
-    batchTimer = null;
-  }
+  if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
 
   learningEvents.emit('activity', {
     type: 'learn',
     msg: `📦 Batch processing ${batch.length} messages...`
   });
 
+  // boardLearning.js ጋር shared context
+  const context = await buildUnifiedContext();
+
   const adminMessages = batch.filter(m => m.isAdmin).map(m => m.text);
-  const userMessages = batch.filter(m => !m.isAdmin);
-  const qaExchanges = userMessages
-    .filter(m => m.botResponse)
-    .map((m, i) => `${i + 1}. User: "${m.text}" → Bot: "${m.botResponse}"`);
+  const userExchanges = batch
+    .filter(m => !m.isAdmin && m.botResponse)
+    .map((m, i) => `${i+1}. @${m.username}: "${m.text}" → Bot: "${m.botResponse}"`);
+
+  const userStyles = batch
+    .filter(m => !m.isAdmin)
+    .reduce((acc, m) => {
+      if (m.username) {
+        if (!acc[m.username]) acc[m.username] = [];
+        acc[m.username].push(m.text);
+      }
+      return acc;
+    }, {});
 
   const prompt = `
-You are a learning AI student for an Amharic Telegram lottery group.
-Analyze this batch of ${batch.length} messages from your teacher (admin) and users.
+አንተ Telegram lottery bot AI ነህ። ሁሉንም ከ admin ትምራለህ።
+
+Current group understanding:
+${JSON.stringify(context.groupContext || 'not yet determined')}
 
 ADMIN messages (${adminMessages.length}):
-${adminMessages.map((m, i) => `${i + 1}. "${m}"`).join('\n') || 'None'}
+${adminMessages.map((m, i) => `${i+1}. "${m}"`).join('\n') || 'None'}
 
-USER + BOT exchanges (${qaExchanges.length}):
-${qaExchanges.join('\n') || 'None'}
+USER + BOT exchanges (${userExchanges.length}):
+${userExchanges.join('\n') || 'None'}
+
+User styles observed:
+${Object.entries(userStyles).map(([u, msgs]) => `@${u}: ${msgs.slice(0,3).map(m => `"${m}"`).join(', ')}`).join('\n') || 'None'}
+
+Board edits from admin:
+${context.edits?.slice(0, 5).map(e => `"${e.before_text?.slice(0, 40)}" → "${e.after_text?.slice(0, 40)}"`).join('\n') || 'None'}
+
+ትንተና:
+1. Bot ምን ስህተት ሰራ? (wasGood: false ያሉትን ፈልግ)
+2. Group ምን ዓይነት ነው? ምን pattern አለ?
+3. Users ምን ፈለጉ? Admin ምን አደረገ?
+4. ምን ተማርን?
 
 Return ONLY valid JSON:
 {
-  "adminStyle": {
-    "responses": [],
-    "greetings": [],
-    "warnings": [],
-    "tone": ""
-  },
+  "adminStyle": { "responses": [], "greetings": [], "warnings": [], "tone": "" },
   "rules": [],
   "intents": [{"pattern": "", "meaning": "", "response": ""}],
-  "writingStyle": {
-    "amharic": [],
-    "commonPhrases": [],
-    "emojiUsage": ""
+  "writingStyle": { "amharic": [], "commonPhrases": [], "emojiUsage": "" },
+  "groupContext": {
+    "groupType": "lottery | betting | savings | other",
+    "adminPersonality": "",
+    "commonUserRequests": [],
+    "rules": []
   },
+  "badResponses": ["response texts that were wrong — to clear from cache"],
+  "goodResponses": [{"intent": "", "response": ""}],
   "miniSummary": "brief summary in Amharic",
-  "topPatterns": [],
   "shouldUpdate": true
 }`;
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
     if (parsed.shouldUpdate) {
       await updateKnowledge({
@@ -1187,13 +1223,42 @@ Return ONLY valid JSON:
         intents: parsed.intents || [],
         writingStyle: parsed.writingStyle,
       });
+
+      // group context ያስቀምጣል
+      if (parsed.groupContext?.groupType && parsed.groupContext.groupType !== 'other') {
+        await saveGroupContext(parsed.groupContext);
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `🌍 Group understood: ${parsed.groupContext.groupType}`
+        });
+      }
+
+      // ስህተት responses — cache ያፀዳ
+      if (parsed.badResponses?.length > 0) {
+        for (const bad of parsed.badResponses) {
+          await query(`
+            UPDATE qa_pairs SET confidence = 0.2
+            WHERE admin_reply = $1 AND is_admin_verified = FALSE
+          `, [bad]).catch(() => {});
+        }
+        learningEvents.emit('activity', {
+          type: 'learn',
+          msg: `🧹 Cleared ${parsed.badResponses.length} bad cache entries`
+        });
+      }
+
+      // ጥሩ responses — intent cache ያጠናክር
+      if (parsed.goodResponses?.length > 0) {
+        for (const good of parsed.goodResponses) {
+          await saveIntentCache(good.intent, null, good.response, 0.85);
+        }
+      }
     }
 
     if (parsed.miniSummary) {
       miniSummaries.push({
         time: new Date().toISOString(),
         summary: parsed.miniSummary,
-        patterns: parsed.topPatterns || [],
         messageCount: batch.length,
       });
 
@@ -1211,66 +1276,92 @@ Return ONLY valid JSON:
 }
 
 // ─────────────────────────────────────────
-// 🌙 24HR DEEP LEARNING
+// 🌙 UNIFIED DEEP LEARNING — ai + board አንድ ላይ
 // ─────────────────────────────────────────
-export async function deepNightLearning() {
+export async function unifiedDeepLearning(boardMiniSummaries = [], boardExchanges = []) {
   learningEvents.emit('activity', {
     type: 'learn',
-    msg: '🌙 24hr Deep Learning እየጀመረ...'
+    msg: '🌙 Unified Deep Learning እየጀመረ...'
   });
 
-  const knowledge = await readKnowledge();
-  const history = await getHistory(1);
-  const bestPairs = await getBestQAPairs(20);
-  const edits = await getBoardEdits(50);
-  const deletions = await getDeletedMessages(20);
+  // ሁሉንም DB ከ አንድ ቦታ ያነባል
+  const [knowledge, bestPairs, edits, deletions, userStyles, groupContext] = await Promise.all([
+    readKnowledge(),
+    getBestQAPairs(20),
+    getBoardEdits(50),
+    getDeletedMessages(20),
+    getUserStyles(30),
+    getGroupContext(),
+  ]);
 
-  const summariesToProcess = [...miniSummaries];
+  const allMiniSummaries = [...miniSummaries, ...boardMiniSummaries];
+  const allExchanges = [...dailyExchanges, ...boardExchanges];
+
+  // buffer ያፀዳ
   miniSummaries.length = 0;
-  const exchangesToReview = [...dailyExchanges];
   dailyExchanges.length = 0;
 
   const prompt = `
-You are a deep learning AI student for an Amharic lottery Telegram group.
-End of day — review everything you learned today and consolidate.
+አንተ Telegram bot AI ነህ። ዛሬ ሙሉ ቀን ምን ሆነ? ሁሉንም ገምግም።
 
-Mini summaries today (${summariesToProcess.length} batches):
-${summariesToProcess.map((s, i) => `Batch ${i+1}: ${s.summary} (${s.messageCount} msgs)`).join('\n')}
+Group type so far: ${groupContext?.groupType || 'still learning'}
+Group rules: ${groupContext?.rules?.join(', ') || 'learning...'}
 
-Board edits studied today (${edits.length}):
-${edits.slice(0, 20).map(e =>
-  `- "${e.before_text?.slice(0, 30)}" → "${e.after_text?.slice(0, 30)}"`
-).join('\n') || 'None'}
+Mini summaries today (${allMiniSummaries.length} batches):
+${allMiniSummaries.map((s, i) => `Batch ${i+1}: ${s.summary} (${s.messageCount} msgs)`).join('\n') || 'None'}
+
+Board edits today (${edits.length}):
+${edits.slice(0, 20).map(e => `"${e.before_text?.slice(0, 40)}" → "${e.after_text?.slice(0, 40)}"`).join('\n') || 'None'}
+
+Deleted messages (${deletions.length}):
+${deletions.slice(0, 10).map(d => `"${d.text?.slice(0, 50)}"`).join('\n') || 'None'}
 
 Current knowledge:
-- Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
 - Rules: ${knowledge.rules?.length || 0}
+- Admin phrases: ${knowledge.adminStyle?.responses?.length || 0}
 - Confidence: ${Math.round((knowledge.confidence || 0) * 100)}%
 
-Today's Q&A exchanges:
-${exchangesToReview.slice(0, 50).map((e, i) =>
-  `${i+1}. User: "${e.user}" → Bot: "${e.bot}"`
-).join('\n') || 'None'}
+Today's exchanges (${allExchanges.length}):
+${allExchanges.slice(0, 30).map((e, i) => `${i+1}. @${e.username || '?'}: "${e.user}" → Bot: "${e.bot}"`).join('\n') || 'None'}
+
+User styles:
+${userStyles.slice(0, 15).map(u => `@${u.username}: "${u.intent}" (${u.message_count} msgs)`).join('\n') || 'None'}
+
+Best Q&A pairs (${bestPairs.length}):
+${bestPairs.slice(0, 10).map(p => `"${p.user_message}" → "${p.admin_reply}" (${Math.round(p.confidence * 100)}%)`).join('\n') || 'None'}
+
+ሁሉንም ገምግም:
+1. Group ምን ዓይነት ነው? ምን ተረዳህ?
+2. Admin ምን style አለው?
+3. Users ምን ፈለጉ?
+4. Bot ምን ስህተት ሰራ?
+5. ምን ማሻሻል አለብን?
 
 Return ONLY valid JSON:
 {
   "consolidatedRules": [],
-  "strengthenedIntents": [
-    {"pattern": "", "meaning": "", "betterResponse": "", "confidence": 0.9}
-  ],
+  "strengthenedIntents": [{"pattern": "", "meaning": "", "betterResponse": "", "confidence": 0.9}],
+  "groupContext": {
+    "groupType": "lottery | betting | savings | other",
+    "adminPersonality": "description",
+    "typicalFlow": "how the group works",
+    "commonUserRequests": [],
+    "peakHours": [],
+    "rules": []
+  },
+  "userPatterns": [{"username": "", "typicalIntent": "", "style": ""}],
+  "badCacheToRemove": ["bad responses to clear"],
   "gaps": [],
-  "newConfidence": 0.85,
+  "newConfidence": 0.0,
   "readyToReplace": false,
-  "dailySummary": "ዛሬ ምን ተማርኩ — Amharic summary",
-  "improvements": [],
-  "totalPatternsLearned": 0
+  "dailySummary": "ዛሬ ምን ተማርኩ — Amharic"
 }`;
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
 
+    // knowledge ያዘምናል
     await updateKnowledge({
       rules: parsed.consolidatedRules || [],
       intents: parsed.strengthenedIntents || [],
@@ -1281,99 +1372,99 @@ Return ONLY valid JSON:
       lastDeepLearning: new Date().toISOString(),
     });
 
+    // group context ያዘምናል
+    if (parsed.groupContext?.groupType) {
+      await saveGroupContext(parsed.groupContext);
+    }
+
+    // ስህተት cache ያፀዳ
+    if (parsed.badCacheToRemove?.length > 0) {
+      for (const bad of parsed.badCacheToRemove) {
+        await query(`
+          UPDATE qa_pairs SET confidence = 0.1
+          WHERE admin_reply = $1 AND is_admin_verified = FALSE
+        `, [bad]).catch(() => {});
+      }
+      learningEvents.emit('activity', {
+        type: 'learn',
+        msg: `🧹 Deep clean: ${parsed.badCacheToRemove.length} bad entries removed`
+      });
+    }
+
+    // user patterns ያስቀምጣል
+    if (parsed.userPatterns?.length > 0) {
+      for (const up of parsed.userPatterns) {
+        if (up.username) {
+          await query(`
+            UPDATE user_styles SET intent = $1 WHERE username = $2
+          `, [up.typicalIntent, up.username]).catch(() => {});
+        }
+      }
+    }
+
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `🌙 Deep Learning ተጠናቀቀ! ${Math.round((parsed.newConfidence || 0) * 100)}% — ${parsed.totalPatternsLearned} patterns`
+      msg: `🌙 Deep Learning ተጠናቀቀ! ${Math.round((parsed.newConfidence || 0) * 100)}% — Group: ${parsed.groupContext?.groupType || '?'}`
     });
 
     return parsed;
   } catch (err) {
-    console.error('[NIGHT] Deep learning error:', err.message);
+    console.error('[DEEP] Learning error:', err.message);
     return null;
   }
 }
 
+// backward compat — ያሮጉ code ሲጠራ
+export async function deepNightLearning() {
+  return await unifiedDeepLearning();
+}
+
 // ─────────────────────────────────────────
-// ⭐ LEARN FROM RATING
+// LEARN FROM RATING
 // ─────────────────────────────────────────
 export async function learnFromRating(userText, botResponse, score) {
   const RATING_LABELS = { 1: '👎 ዝቅተኛ', 2: '😐 መካከለኛ', 3: '👍 አሪፍ', 4: '🔥 በጣም አሪፍ' };
-  const label = RATING_LABELS[score] || '?';
   const isGood = score >= 3;
   const isExcellent = score === 4;
   const isBad = score === 1;
 
-  const prompt = `
-Amharic lottery bot response rating — student learning from feedback:
+  const updates = {};
 
-User: "${userText}"
-Bot: "${botResponse}"
-Rating: ${score}/4 — ${label}
-
-Return ONLY valid JSON:
-{
-  "ruleToAdd": "rule or null",
-  "pattern": ${JSON.stringify(userText)},
-  "goodResponse": ${isGood ? JSON.stringify(botResponse) : 'null'},
-  "badResponse": ${isBad ? JSON.stringify(botResponse) : 'null'},
-  "improvement": ${!isGood ? '"how to improve"' : 'null'},
-  "confidenceChange": ${score === 4 ? 0.3 : score === 3 ? 0.1 : score === 2 ? 0 : -0.2},
-  "saveAsExample": ${isExcellent}
-}`;
-
-  try {
-    const response = await callDeepSeekLearn(prompt);
-    const clean = response.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-
-    const updates = {};
-    if (parsed.ruleToAdd) updates.rules = [parsed.ruleToAdd];
-    if (isExcellent && parsed.goodResponse) {
-      updates.intents = [{
-        pattern: userText,
-        meaning: 'admin rated excellent 🔥',
-        response: parsed.goodResponse,
-        betterResponse: parsed.goodResponse,
-        rating: 4,
-        locked: true,
-      }];
-      updates.adminStyle = { responses: [parsed.goodResponse] };
-    }
-    if (score === 3 && parsed.goodResponse) {
-      updates.intents = [{
-        pattern: userText,
-        meaning: 'admin rated good 👍',
-        response: parsed.goodResponse,
-        betterResponse: parsed.goodResponse,
-        rating: 3,
-      }];
-    }
-    if (isBad) {
-      updates.rules = [
-        `Avoid: "${botResponse.slice(0, 50)}" when user says "${userText.slice(0, 50)}"`
-      ];
-    }
-
-    if (Object.keys(updates).length > 0) await updateKnowledge(updates);
-    await updateQAConfidence(userText, isGood, parsed.confidenceChange || 0).catch(() => {});
-
-    learningEvents.emit('activity', {
-      type: isGood ? 'learn' : 'eval',
-      msg: `⭐ Rating ${score}/4 (${label}) — "${userText.slice(0, 30)}"`
-    });
-
-    return parsed;
-  } catch (err) {
-    console.error('[RATING] Learn error:', err.message);
-    return null;
+  if (isExcellent) {
+    updates.intents = [{
+      pattern: userText, meaning: 'admin rated excellent 🔥',
+      response: botResponse, betterResponse: botResponse, rating: 4, locked: true,
+    }];
+    updates.adminStyle = { responses: [botResponse] };
+    // intent cache ያጠናክር
+    await saveIntentCache('excellent_rated', null, botResponse, 0.95);
   }
+
+  if (isBad) {
+    // ስህተት cache ወዲያው ያፀዳ
+    await query(`
+      UPDATE qa_pairs SET confidence = 0.1
+      WHERE admin_reply = $1 AND is_admin_verified = FALSE
+    `, [botResponse]).catch(() => {});
+    updates.rules = [`Avoid: "${botResponse.slice(0, 50)}" when user says "${userText.slice(0, 50)}"`];
+    learningEvents.emit('activity', { type: 'learn', msg: `🧹 Bad response cleared immediately` });
+  }
+
+  if (Object.keys(updates).length > 0) await updateKnowledge(updates);
+  await updateQAConfidence(userText, isGood).catch(() => {});
+
+  learningEvents.emit('activity', {
+    type: isGood ? 'learn' : 'eval',
+    msg: `⭐ Rating ${score}/4 (${RATING_LABELS[score]}) — "${userText.slice(0, 30)}"`
+  });
 }
 
 // ─────────────────────────────────────────
-// 📷 ANALYZE PHOTO
+// ANALYZE PHOTO
 // ─────────────────────────────────────────
 export async function analyzePhoto(base64Image, caption = '', username = '', context = '') {
   const knowledge = await readKnowledge();
+  const groupContext = await getGroupContext();
 
   try {
     const key = getResponseDeepSeekKey();
@@ -1384,121 +1475,72 @@ export async function analyzePhoto(base64Image, caption = '', username = '', con
 
     const completion = await client.chat.completions.create({
       model: 'deepseek-ai/deepseek-v4-flash',
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:image/jpeg;base64,${base64Image}`,
-              },
-            },
-            {
-              type: 'text',
-              text: `
-You are an AI student analyzing a photo sent in an Amharic Telegram lottery group.
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
+          { type: 'text', text: `
+አንተ Telegram lottery bot AI ነህ። ሁሉንም ከ admin ተምረሃል።
 
+Group type: ${groupContext?.groupType || 'learning...'}
 Caption: "${caption || '(none)'}"
 Sent by: @${username}
 Context: ${context}
+Rules: ${knowledge.rules?.slice(0, 5).join(', ') || 'learning...'}
 
-What you learned about this group:
-- Rules: ${knowledge.rules?.slice(0, 10).join(', ') || 'learning...'}
-- Admin phrases: ${knowledge.adminStyle?.responses?.slice(0, 5).join(', ') || 'learning...'}
-
-Look at the photo carefully. DO NOT assume — analyze what you actually see.
+Photo ምን ያሳያል? Context ውስጥ ምን ማለት ነው?
 
 Return ONLY valid JSON:
 {
-  "photoType": "what type of photo this is",
-  "extractedText": "any text visible in the photo",
-  "meaning": "what this photo means in context",
-  "suggestedAction": "what the bot should do",
-  "keyDetails": {
-    "amount": null,
-    "name": null,
-    "number": null,
-    "bank": null,
-    "other": null
-  },
+  "photoType": "what type of photo",
+  "extractedText": "any text visible",
+  "meaning": "what this means in context",
+  "suggestedAction": "what bot should do",
+  "keyDetails": { "amount": null, "name": null, "number": null, "bank": null, "other": null },
   "confidence": 0.8,
   "shouldLearn": true,
-  "ruleToLearn": "any rule to remember, or null"
-}`,
-            },
-          ],
-        },
-      ],
+  "ruleToLearn": "rule or null"
+}` }
+        ]
+      }],
       max_tokens: 2048,
       temperature: 0.3,
     });
 
-    await trackTokens(
-      'nvidia-deepseek',
+    await trackTokens('nvidia-deepseek',
       completion.usage?.prompt_tokens || 0,
       completion.usage?.completion_tokens || 0
     );
 
     const raw = completion.choices[0]?.message?.content || '';
-    const clean = raw.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
 
     if (parsed.shouldLearn && parsed.ruleToLearn) {
       await updateKnowledge({ rules: [parsed.ruleToLearn] });
     }
 
     if (parsed.meaning) {
-      setTimeout(() => {
-        deepSeekBackgroundLearn(
-          `[PHOTO] ${caption || parsed.photoType}`,
-          parsed.meaning,
-          `Photo from @${username}: ${parsed.extractedText?.slice(0, 100) || ''}`
-        ).catch(() => {});
-      }, 5 * 60 * 1000);
+      setImmediate(() => backgroundLearn(
+        `[PHOTO] ${caption || parsed.photoType}`,
+        parsed.meaning,
+        `Photo from @${username}`
+      ).catch(() => {}));
     }
 
     learningEvents.emit('activity', {
       type: 'learn',
-      msg: `📷 Photo analyzed — ${parsed.photoType?.slice(0, 50)} (${Math.round((parsed.confidence || 0) * 100)}%)`
+      msg: `📷 Photo analyzed — ${parsed.photoType?.slice(0, 40)} (${Math.round((parsed.confidence || 0) * 100)}%)`
     });
 
     return parsed;
-
   } catch (err) {
     console.error('[PHOTO] Vision error:', err.message);
-
-    if (caption) {
-      const fallback = await callDeepSeekLearn(`
-You are an AI student in an Amharic lottery Telegram group.
-A photo was sent with caption: "${caption}" by @${username}
-What does this mean? What should the bot do?
-Return ONLY valid JSON:
-{
-  "photoType": "unknown - caption only",
-  "extractedText": "${caption}",
-  "meaning": "inferred from caption",
-  "suggestedAction": "respond_only",
-  "keyDetails": { "amount": null, "name": null, "number": null, "bank": null, "other": null },
-  "confidence": 0.4,
-  "shouldLearn": false,
-  "ruleToLearn": null
-}`);
-
-      try {
-        const clean = fallback.replace(/```json|```/g, '').trim();
-        return JSON.parse(clean);
-      } catch {
-        return null;
-      }
-    }
-
     return null;
   }
 }
 
 // ─────────────────────────────────────────
-// PRIVATE CHAT CONTEXT
+// PRIVATE CHAT
 // ─────────────────────────────────────────
 const privateChatHistories = new Map();
 const MAX_RECENT = 20;
@@ -1518,8 +1560,9 @@ async function addToPrivateHistory(userId, role, content) {
     const oldMessages = history.messages.splice(0, history.messages.length - MAX_RECENT);
     const oldText = oldMessages.map(m => `${m.role}: "${m.content}"`).join('\n');
     try {
-      const summaryPrompt = `Summarize this conversation briefly in Amharic (max 3 sentences):\n${oldText}\nReturn ONLY the summary text, no JSON.`;
-      const newSummary = await callDeepSeekLearn(summaryPrompt);
+      const newSummary = await callDeepSeekLearn(
+        `Summarize briefly in Amharic (3 sentences max):\n${oldText}\nReturn ONLY summary text.`
+      );
       history.summary = (history.summary ? history.summary + ' | ' : '') + newSummary.trim();
     } catch {
       history.summary = `${oldMessages.length} messages discussed earlier`;
@@ -1527,70 +1570,47 @@ async function addToPrivateHistory(userId, role, content) {
   }
 }
 
-// ─────────────────────────────────────────
-// PRIVATE CHAT TEACHING MODE
-// ─────────────────────────────────────────
 export async function handlePrivateTeaching(userId, userMessage) {
-  const knowledge = await readKnowledge();
+  const [knowledge, groupContext] = await Promise.all([
+    readKnowledge(),
+    getGroupContext(),
+  ]);
   const history = getPrivateHistory(userId);
   const confidencePct = Math.round((knowledge.confidence || 0) * 100);
 
-  const historyMessages = history.messages.map(m => ({
-    role: m.role,
-    content: m.content,
-  }));
+  const systemPrompt = `አንተ Telegram bot AI ነህ። Admin private ውስጥ ያስተምርሃል።
 
-  const systemPrompt = `You are an AI student learning to become the admin of an Amharic Telegram lottery group.
+Group: ${groupContext?.groupType || 'learning...'}
+Confidence: ${confidencePct}%
+Rules: ${knowledge.rules?.slice(0, 10).map((r, i) => `${i+1}. ${r}`).join(' | ') || 'ገና እየተማርኩ ነው'}
+Board template: ${knowledge.boardTemplate ? '✅ አውቃለሁ' : '❌ ገና አላወቅሁም'}
+${history.summary ? `Earlier: ${history.summary}` : ''}
 
-YOUR MINDSET:
-- You are a humble student — your teacher (admin) is talking to you privately
-- Listen carefully, ask smart questions, learn everything
-- Remember everything from this conversation
-- When teacher corrects you — say "ገባኝ ተማርኩ 🙏" and update your understanding
-- Be conversational — talk naturally like a student to teacher
-
-WHAT YOU KNOW SO FAR (${confidencePct}%):
-- Rules: ${knowledge.rules?.slice(0, 10).map((r, i) => `${i+1}. ${r}`).join(' | ') || 'ገና እየተማርኩ ነው'}
-- Admin style: ${knowledge.adminStyle?.responses?.slice(0, 5).join(' | ') || 'ገና እየተማርኩ ነው'}
-- Board template: ${knowledge.boardTemplate ? 'አውቃለሁ ✅' : 'ገና አላወቅሁም ❌'}
-- Intents: ${knowledge.intents?.length || 0} patterns learned
-
-${history.summary ? `EARLIER IN THIS CONVERSATION:\n${history.summary}` : ''}
-
-BEHAVIOR:
-- ሁልጊዜ በአማርኛ ተናገር
-- ጥያቄ ስጠይቅ አንድ ብቻ ጠይቅ
-- ስህተት ሲነገርህ ወዲያው ተማር እና አረጋግጥ
-- አጭር እና ቀጥተኛ ሁን`;
+ሁልጊዜ በአማርኛ ተናገር። አጭር ሁን። ስህተት ሲነገርህ ተማር።`;
 
   await addToPrivateHistory(userId, 'user', userMessage);
 
   try {
     const key = getResponseDeepSeekKey();
-    const client = new OpenAI({
-      apiKey: key,
-      baseURL: 'https://integrate.api.nvidia.com/v1',
-    });
+    const client = new OpenAI({ apiKey: key, baseURL: 'https://integrate.api.nvidia.com/v1' });
 
     const completion = await client.chat.completions.create({
       model: 'deepseek-ai/deepseek-v4-flash',
       messages: [
         { role: 'system', content: systemPrompt },
-        ...historyMessages,
+        ...history.messages.map(m => ({ role: m.role, content: m.content })),
         { role: 'user', content: userMessage },
       ],
       max_tokens: 1024,
       temperature: 0.7,
     });
 
-    await trackTokens(
-      'nvidia-deepseek',
+    await trackTokens('nvidia-deepseek',
       completion.usage?.prompt_tokens || 0,
       completion.usage?.completion_tokens || 0
     );
 
     const botReply = completion.choices[0]?.message?.content || 'ልረዳ አልቻልኩም።';
-
     await addToPrivateHistory(userId, 'assistant', botReply);
 
     setImmediate(() => {
@@ -1598,15 +1618,8 @@ BEHAVIOR:
       learnLotteryRules(userMessage).catch(() => {});
       saveQAPair(userMessage, botReply, 'private_teaching', '', true).catch(() => {});
       updateKnowledge({
-        intents: [{
-          pattern: userMessage,
-          meaning: 'admin taught this privately',
-          response: botReply,
-          betterResponse: botReply,
-        }],
-        adminStyle: {
-          responses: [botReply],
-        }
+        intents: [{ pattern: userMessage, meaning: 'admin taught privately', response: botReply, betterResponse: botReply }],
+        adminStyle: { responses: [botReply] }
       }).catch(() => {});
     });
 
@@ -1616,9 +1629,8 @@ BEHAVIOR:
     });
 
     return botReply;
-
   } catch (err) {
-    console.error('[PRIVATE CHAT] Error:', err.message);
+    console.error('[PRIVATE] Error:', err.message);
     return 'ይቅርታ፣ ልረዳ አልቻልኩም። እባክህ ደግም ሞክር።';
   }
 }
