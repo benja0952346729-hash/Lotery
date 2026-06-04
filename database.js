@@ -63,6 +63,7 @@ export async function initDB() {
       user_id BIGINT,
       username TEXT,
       first_name TEXT,
+      last_name TEXT,
       text TEXT,
       is_admin BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT NOW()
@@ -209,10 +210,35 @@ export async function initDB() {
     )
   `);
 
-  // context column ለ action_logs — ካለሌለ ጨምር
+  // ── አዲስ: user_styles — users ምን style እንዳላቸው ለመማር ──
   await query(`
-    ALTER TABLE action_logs
-    ADD COLUMN IF NOT EXISTS context TEXT
+    CREATE TABLE IF NOT EXISTS user_styles (
+      id SERIAL PRIMARY KEY,
+      user_id BIGINT UNIQUE NOT NULL,
+      username TEXT,
+      sample_message TEXT,
+      intent TEXT,
+      message_count INTEGER DEFAULT 1,
+      seen_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  // ── user_styles — ካልተፈጠረ ፍጠር ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_styles (
+      id SERIAL PRIMARY KEY,
+      user_id BIGINT UNIQUE NOT NULL,
+      username TEXT,
+      sample_message TEXT,
+      intent TEXT,
+      message_count INTEGER DEFAULT 1,
+      seen_at TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(err => console.log('[DB] user_styles:', err.message));
+
+  // ── existing columns fix ──
+  await query(`
+    ALTER TABLE action_logs ADD COLUMN IF NOT EXISTS context TEXT
   `).catch(() => {});
 
   await ensureTokenService('nvidia-deepseek');
@@ -229,6 +255,8 @@ export async function initDB() {
     rules: [],
     intents: [],
     writingStyle: { amharic: [], tone: '', commonPhrases: [] },
+    boardPatterns: [],
+    privateRules: [],
     lastUpdated: null,
   };
   await query(`
@@ -274,9 +302,9 @@ function deepMergeArrays(target = {}, source = {}) {
   for (const key of Object.keys(source)) {
     const sVal = source[key];
     const tVal = target[key];
-
     if (Array.isArray(sVal) && Array.isArray(tVal)) {
-      const bothPrimitive = sVal.every(v => (v === null || typeof v !== 'object')) && tVal.every(v => (v === null || typeof v !== 'object'));
+      const bothPrimitive = sVal.every(v => v === null || typeof v !== 'object') &&
+                            tVal.every(v => v === null || typeof v !== 'object');
       if (bothPrimitive) {
         result[key] = Array.from(new Set([...(tVal || []), ...sVal]));
       } else {
@@ -285,7 +313,7 @@ function deepMergeArrays(target = {}, source = {}) {
           try {
             const k = (item && typeof item === 'object') ? JSON.stringify(item) : String(item);
             if (!map.has(k)) map.set(k, item);
-          } catch (e) {
+          } catch {
             const k = String(item);
             if (!map.has(k)) map.set(k, item);
           }
@@ -304,13 +332,14 @@ function deepMergeArrays(target = {}, source = {}) {
 // ===== HISTORY =====
 export async function saveHistory(message) {
   await query(`
-    INSERT INTO history (message_id, user_id, username, first_name, text, is_admin)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO history (message_id, user_id, username, first_name, last_name, text, is_admin)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
   `, [
     message.message_id,
     message.from?.id,
     message.from?.username,
     message.from?.first_name,
+    message.from?.last_name || null,
     message.text || '',
     message._isAdmin || false,
   ]);
@@ -336,16 +365,12 @@ export async function saveBoardMessage(messageId, chatId, text) {
 }
 
 export async function getBoardMessage() {
-  const res = await query(`
-    SELECT * FROM board_messages ORDER BY sent_at DESC LIMIT 1
-  `);
+  const res = await query(`SELECT * FROM board_messages ORDER BY sent_at DESC LIMIT 1`);
   return res.rows[0] || null;
 }
 
 export async function updateBoardMessageText(messageId, newText) {
-  await query(`
-    UPDATE board_messages SET text = $1 WHERE message_id = $2
-  `, [newText, messageId]);
+  await query(`UPDATE board_messages SET text = $1 WHERE message_id = $2`, [newText, messageId]);
 }
 
 // ===== BOARD EDITS =====
@@ -358,10 +383,7 @@ export async function saveBoardEdit(messageId, chatId, beforeText, afterText) {
 
 export async function getUnlearnedEdits(limit = 20) {
   const res = await query(`
-    SELECT * FROM board_edits
-    WHERE learned = FALSE
-    ORDER BY edited_at ASC
-    LIMIT $1
+    SELECT * FROM board_edits WHERE learned = FALSE ORDER BY edited_at ASC LIMIT $1
   `, [limit]);
   return res.rows;
 }
@@ -396,8 +418,7 @@ export async function getDeletedMessages(limit = 20) {
 export async function saveActionLog(actionType, trigger, reason, details = {}, isAdmin = true) {
   const existing = await query(`
     SELECT id, times_seen, times_correct FROM action_logs
-    WHERE action_type = $1 AND trigger = $2
-    LIMIT 1
+    WHERE action_type = $1 AND trigger = $2 LIMIT 1
   `, [actionType, trigger]);
 
   if (existing.rows.length > 0) {
@@ -410,11 +431,7 @@ export async function saveActionLog(actionType, trigger, reason, details = {}, i
           details = $2,
           updated_at = NOW()
       WHERE id = $3
-    `, [
-      (row.times_correct + 1) / (row.times_seen + 1),
-      JSON.stringify(details),
-      row.id,
-    ]);
+    `, [(row.times_correct + 1) / (row.times_seen + 1), JSON.stringify(details), row.id]);
   } else {
     await query(`
       INSERT INTO action_logs (action_type, trigger, reason, details, is_admin, confidence)
@@ -454,9 +471,7 @@ export async function getActionLogs(minConfidence = 0.0) {
 // ===== Q&A PAIRS =====
 export async function saveQAPair(userMessage, adminReply, context = '', intent = '', isAdminVerified = false) {
   const existing = await query(`
-    SELECT id, times_used, times_correct FROM qa_pairs
-    WHERE user_message = $1
-    LIMIT 1
+    SELECT id, times_used, times_correct FROM qa_pairs WHERE user_message = $1 LIMIT 1
   `, [userMessage]);
 
   if (existing.rows.length > 0) {
@@ -470,12 +485,7 @@ export async function saveQAPair(userMessage, adminReply, context = '', intent =
           is_admin_verified = $3,
           updated_at = NOW()
       WHERE id = $4
-    `, [
-      adminReply,
-      (row.times_correct + 1) / (row.times_used + 1),
-      isAdminVerified,
-      row.id,
-    ]);
+    `, [adminReply, (row.times_correct + 1) / (row.times_used + 1), isAdminVerified, row.id]);
   } else {
     await query(`
       INSERT INTO qa_pairs (user_message, admin_reply, context, intent, confidence, is_admin_verified)
@@ -486,8 +496,7 @@ export async function saveQAPair(userMessage, adminReply, context = '', intent =
 
 export async function updateQAConfidence(userMessage, wasCorrect) {
   const res = await query(`
-    SELECT id, times_used, times_correct FROM qa_pairs
-    WHERE user_message = $1
+    SELECT id, times_used, times_correct FROM qa_pairs WHERE user_message = $1
   `, [userMessage]);
 
   if (res.rows.length > 0) {
@@ -536,10 +545,7 @@ export async function registerMember(userId, username, number) {
   const already = await query(`SELECT number FROM lottery WHERE user_id = $1`, [userId]);
   if (already.rows.length > 0) return { success: false, reason: 'already_registered', number: already.rows[0].number };
 
-  await query(`
-    INSERT INTO lottery (number, user_id, username) VALUES ($1, $2, $3)
-  `, [number, userId, username]);
-
+  await query(`INSERT INTO lottery (number, user_id, username) VALUES ($1, $2, $3)`, [number, userId, username]);
   return { success: true, number };
 }
 
@@ -558,41 +564,29 @@ export async function clearLottery() {
 
 // ===== LOTTERY RESULTS =====
 export async function saveLotteryResult({ telegramId, series, first, second, third, announcedAt, status }) {
-  console.log(`[DB] saveLotteryResult — Series: ${series} | 1ኛ: ${first} | 2ኛ: ${second} | 3ኛ: ${third}`);
   await query(`
     INSERT INTO lottery_results (telegram_id, series, first, second, third, status, announced_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7)
   `, [telegramId, series, first, second, third, status || 'ውጤት ታወጀ', announcedAt || new Date().toISOString()]);
-  console.log(`[DB] Lottery result saved ✅`);
 }
 
 export async function getLotteryResults(limit = 20) {
-  const res = await query(`
-    SELECT * FROM lottery_results ORDER BY announced_at DESC LIMIT $1
-  `, [limit]);
+  const res = await query(`SELECT * FROM lottery_results ORDER BY announced_at DESC LIMIT $1`, [limit]);
   return res.rows;
 }
 
 export async function cleanupLotteryResults() {
-  console.log('[DB] cleanupLotteryResults running...');
-  const results = await query(`
-    DELETE FROM lottery_results WHERE announced_at < NOW() - INTERVAL '2 days'
-  `);
-  const events = await query(`
-    DELETE FROM lottery_live_events WHERE triggered_at < NOW() - INTERVAL '2 days'
-  `);
-  console.log(`[DB] Lottery cleanup done — Results: ${results.rowCount} | Live Events: ${events.rowCount}`);
+  const results = await query(`DELETE FROM lottery_results WHERE announced_at < NOW() - INTERVAL '2 days'`);
+  const events = await query(`DELETE FROM lottery_live_events WHERE triggered_at < NOW() - INTERVAL '2 days'`);
   return { results: results.rowCount, events: events.rowCount };
 }
 
 // ===== LOTTERY LIVE EVENTS =====
 export async function saveLotteryLiveEvent({ telegramId, isLive, triggeredAt }) {
-  console.log(`[DB] saveLotteryLiveEvent — TelegramID: ${telegramId} | isLive: ${isLive}`);
   await query(`
     INSERT INTO lottery_live_events (telegram_id, is_live, triggered_at)
     VALUES ($1, $2, $3)
   `, [telegramId, isLive, triggeredAt || new Date().toISOString()]);
-  console.log(`[DB] Live event saved ✅`);
 }
 
 // ===== BOT STATE =====
@@ -602,9 +596,7 @@ export async function getBotState() {
 }
 
 export async function setBotState(isOn, adminId) {
-  await query(`
-    UPDATE bot_state SET is_on = $1, toggled_at = NOW(), toggled_by = $2 WHERE id = 1
-  `, [isOn, adminId]);
+  await query(`UPDATE bot_state SET is_on = $1, toggled_at = NOW(), toggled_by = $2 WHERE id = 1`, [isOn, adminId]);
 }
 
 // ===== TOKEN USAGE =====
@@ -648,160 +640,86 @@ export async function resetTokenUsage() {
 // ===== CLEANUP =====
 export async function cleanupOldData() {
   const results = {};
-
   const h = await query(`DELETE FROM history WHERE created_at < NOW() - INTERVAL '5 days'`);
   results.history = h.rowCount;
-
   const be = await query(`DELETE FROM board_edits WHERE edited_at < NOW() - INTERVAL '5 days'`);
   results.boardEdits = be.rowCount;
-
   const dm = await query(`DELETE FROM deleted_messages WHERE deleted_at < NOW() - INTERVAL '5 days'`);
   results.deletedMessages = dm.rowCount;
-
   const bm = await query(`DELETE FROM board_messages WHERE sent_at < NOW() - INTERVAL '5 days'`);
   results.boardMessages = bm.rowCount;
-
   const al = await query(`DELETE FROM action_logs WHERE updated_at < NOW() - INTERVAL '5 days'`);
   results.actionLogs = al.rowCount;
-
   const qa = await query(`DELETE FROM qa_pairs WHERE updated_at < NOW() - INTERVAL '5 days'`);
   results.qaPairs = qa.rowCount;
-
   console.log('[DB] Cleanup done:', results);
   return results;
 }
 
 // ===== PAYMENT =====
-
-// ── SMS ref already used check ──
 export async function getSmsPaymentByRef(refNo) {
-  const res = await query(`
-    SELECT * FROM payment_sms WHERE ref_no = $1 LIMIT 1
-  `, [refNo]);
+  const res = await query(`SELECT * FROM payment_sms WHERE ref_no = $1 LIMIT 1`, [refNo]);
   return res.rows[0] || null;
 }
 
-// ── Screenshot ref already matched check ──
 export async function isRefMatchedAlready(refNo) {
   if (!refNo) return false;
   const res = await query(`
-    SELECT id FROM payment_screenshots
-    WHERE ref_no = $1 AND matched = TRUE
-    LIMIT 1
+    SELECT id FROM payment_screenshots WHERE ref_no = $1 AND matched = TRUE LIMIT 1
   `, [refNo]);
   return res.rows.length > 0;
 }
 
 export async function saveSmsPayment(refNo, amount, type, rawSms) {
-  console.log(`[DB] saveSmsPayment called — Ref: ${refNo} | Amount: ${amount} | Type: ${type}`);
-
   const res = await query(`
     INSERT INTO payment_sms (ref_no, amount, type, raw_sms)
     VALUES ($1, $2, $3, $4)
     ON CONFLICT (ref_no) DO NOTHING
   `, [refNo, amount, type, rawSms]);
-
-  if (res.rowCount === 0) {
-    console.log(`[DB] SMS skipped — ref_no already exists: ${refNo}`);
-  } else {
-    console.log(`[DB] SMS saved ✅ — Ref: ${refNo} | Amount: ${amount} | Type: ${type}`);
-  }
-
-  const matchResult = await tryMatch({ refNo, amount, type });
-  console.log(`[DB] saveSmsPayment match result:`, JSON.stringify(matchResult));
-  return matchResult;
+  if (res.rowCount === 0) console.log(`[DB] SMS skipped — ref already exists: ${refNo}`);
+  return await tryMatch({ refNo, amount, type });
 }
 
 export async function saveScreenshotPayment(telegramId, refNo, type, description) {
-  console.log(`[DB] saveScreenshotPayment called — TelegramID: ${telegramId} | Ref: ${refNo} | Type: ${type}`);
-
-  const res = await query(`
+  await query(`
     INSERT INTO payment_screenshots (telegram_id, ref_no, type, description)
     VALUES ($1, $2, $3, $4)
   `, [telegramId, refNo, type, description]);
-
-  if (res.rowCount === 0) {
-    console.log(`[DB] Screenshot NOT saved — rowCount: 0`);
-  } else {
-    console.log(`[DB] Screenshot saved ✅ — TelegramID: ${telegramId} | Ref: ${refNo}`);
-  }
-
-  const matchResult = await tryMatch({ refNo, telegramId });
-  console.log(`[DB] saveScreenshotPayment match result:`, JSON.stringify(matchResult));
-  return matchResult;
+  return await tryMatch({ refNo, telegramId });
 }
 
-// ===== FUZZY REF MATCH =====
 function fuzzyRefMatch(ref1, ref2) {
   if (!ref1 || !ref2) return false;
   if (ref1 === ref2) return true;
-
   const r1 = ref1.toUpperCase();
   const r2 = ref2.toUpperCase();
-
   if (r1.length !== r2.length) return false;
-
-  const knownConfusions = [
-    ['5', 'S'],
-    ['0', 'O'],
-    ['1', 'I'],
-  ];
-
-  function isKnownConfusion(a, b) {
-    return knownConfusions.some(
-      ([x, y]) => (a === x && b === y) || (a === y && b === x)
-    );
+  const knownConfusions = [['5','S'],['0','O'],['1','I']];
+  function isKnown(a, b) {
+    return knownConfusions.some(([x,y]) => (a===x&&b===y)||(a===y&&b===x));
   }
-
-  let knownErrors = 0;
-  let unknownErrors = 0;
-
+  let knownErrors = 0, unknownErrors = 0;
   for (let i = 0; i < r1.length; i++) {
     if (r1[i] === r2[i]) continue;
-
-    if (isKnownConfusion(r1[i], r2[i])) {
-      knownErrors++;
-    } else {
-      unknownErrors++;
-    }
-
+    if (isKnown(r1[i], r2[i])) knownErrors++;
+    else unknownErrors++;
     if (unknownErrors >= 1 && knownErrors >= 1) return false;
     if (unknownErrors >= 2) return false;
     if (knownErrors > 2) return false;
     if (knownErrors + unknownErrors > 2) return false;
   }
-
   return true;
 }
 
 export async function tryMatch({ refNo, amount, type, telegramId }) {
-  console.log(`[DB] tryMatch called — Ref: ${refNo} | TelegramID: ${telegramId || 'N/A'}`);
-
-  if (!refNo) {
-    console.log('[DB] tryMatch — refNo የለም, skipping');
-    return { matched: null };
-  }
-
-  const sms = await query(`
-    SELECT * FROM payment_sms WHERE matched = FALSE
-  `);
-
-  const screenshot = await query(`
-    SELECT * FROM payment_screenshots WHERE matched = FALSE
-  `);
-
-  console.log(`[DB] tryMatch — SMS rows: ${sms.rows.length} | Screenshot rows: ${screenshot.rows.length}`);
-
+  if (!refNo) return { matched: null };
+  const sms = await query(`SELECT * FROM payment_sms WHERE matched = FALSE`);
+  const screenshot = await query(`SELECT * FROM payment_screenshots WHERE matched = FALSE`);
   for (const s of sms.rows) {
     for (const sc of screenshot.rows) {
       if (fuzzyRefMatch(s.ref_no, sc.ref_no)) {
-        console.log(`[DB] ✅ FUZZY MATCH FOUND! SMS Ref: ${s.ref_no} | Screenshot Ref: ${sc.ref_no} | TelegramID: ${sc.telegram_id}`);
-
         await query(`UPDATE payment_sms SET matched = TRUE WHERE id = $1`, [s.id]);
         await query(`UPDATE payment_screenshots SET matched = TRUE WHERE id = $1`, [sc.id]);
-
-        console.log(`[DB] Both records marked as matched ✅`);
-
         return {
           matched: {
             telegramId: sc.telegram_id,
@@ -814,20 +732,12 @@ export async function tryMatch({ refNo, amount, type, telegramId }) {
       }
     }
   }
-
-  console.log(`[DB] No match yet — Ref: ${refNo}`);
   return { matched: null };
 }
 
 export async function cleanupPayments() {
-  console.log('[DB] cleanupPayments running...');
-  const sms = await query(`
-    DELETE FROM payment_sms WHERE created_at < NOW() - INTERVAL '2 days'
-  `);
-  const screenshots = await query(`
-    DELETE FROM payment_screenshots WHERE created_at < NOW() - INTERVAL '2 days'
-  `);
-  console.log(`[DB] Cleanup done — SMS: ${sms.rowCount} | Screenshots: ${screenshots.rowCount}`);
+  const sms = await query(`DELETE FROM payment_sms WHERE created_at < NOW() - INTERVAL '2 days'`);
+  const screenshots = await query(`DELETE FROM payment_screenshots WHERE created_at < NOW() - INTERVAL '2 days'`);
   return { sms: sms.rowCount, screenshots: screenshots.rowCount };
 }
 
