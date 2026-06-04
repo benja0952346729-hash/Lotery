@@ -146,22 +146,104 @@ async function callDeepSeekLearn(prompt, retries = 3) {
 // EXPORT — boardLearning.js ይጠቀምበታል
 // ─────────────────────────────────────────
 // Learning calls — background (learning keys)
+// ─────────────────────────────────────────
+// SAFE JSON PARSER
+// ─────────────────────────────────────────
+function safeParseJSON(raw) {
+  if (!raw) return null;
+  try {
+    const clean = raw
+      .replace(/```json|```/g, "")
+      .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+      .replace(/\uFEFF/g, "")
+      .trim();
+    return safeParseJSON(clean);
+  } catch {
+    const match = raw.match(/{[\s\S]*}/); 
+    if (match) { try { return JSON.parse(match[0]); } catch { return null; } }
+    return null;
+  }
+}
+
+
+// ─────────────────────────────────────────
+// SAFE JSON PARSER — ሁሉም JSON parse ይጠቀምበታል
+// ─────────────────────────────────────────
+function safeParseJSON(raw) {
+  if (!raw) return null;
+  try {
+    const clean = raw
+      .replace(/```json|```/g, '')
+      .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
+      .replace(/\uFEFF/g, '')
+      .trim();
+    return safeParseJSON(clean);
+  } catch {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch { return null; }
+    }
+    return null;
+  }
+}
+
 export async function callDeepSeekAPI(systemPrompt, userPrompt, apiKey, options = {}) {
   const prompt = systemPrompt + '\n\n' + userPrompt;
   const raw = await callDeepSeekLearn(prompt, options.retries || 3);
   try {
-    return JSON.parse(raw.replace(/```json|```/g, '').trim());
+    return safeParseJSON(raw);
   } catch {
     return null;
   }
 }
 
 // Response calls — ፈጣን user-facing (response keys)
+// ─────────────────────────────────────────
+// SAFE JSON PARSER
+// ─────────────────────────────────────────
+function safeParseJSON(raw) {
+  if (!raw) return null;
+  try {
+    const clean = raw
+      .replace(/```json|```/g, "")
+      .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+      .replace(/\uFEFF/g, "")
+      .trim();
+    return safeParseJSON(clean);
+  } catch {
+    const match = raw.match(/{[\s\S]*}/); 
+    if (match) { try { return JSON.parse(match[0]); } catch { return null; } }
+    return null;
+  }
+}
+
+
+// ─────────────────────────────────────────
+// SAFE JSON PARSER — ሁሉም JSON parse ይጠቀምበታል
+// ─────────────────────────────────────────
+function safeParseJSON(raw) {
+  if (!raw) return null;
+  try {
+    const clean = raw
+      .replace(/```json|```/g, '')
+      .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
+      .replace(/\uFEFF/g, '')
+      .trim();
+    return safeParseJSON(clean);
+  } catch {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch { return null; }
+    }
+    return null;
+  }
+}
+
 export async function callDeepSeekAPIFast(systemPrompt, userPrompt, options = {}) {
   const prompt = systemPrompt + '\n\n' + userPrompt;
   const raw = await callDeepSeekResponse(prompt, options.retries || 3);
   try {
-    return JSON.parse(raw.replace(/```json|```/g, '').trim());
+    return safeParseJSON(raw);
   } catch {
     return null;
   }
@@ -361,7 +443,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     if (parsed.shouldLearn && parsed.rule) {
       await updateKnowledge({ rules: [parsed.rule] });
@@ -415,7 +497,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     if (parsed.shouldLearn && parsed.rule) {
       await updateKnowledge({ rules: [parsed.rule] });
@@ -455,7 +537,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     if (parsed.shouldLearn && parsed.newRule) {
       await updateKnowledge({ rules: [parsed.newRule] });
@@ -518,7 +600,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekResponse(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     learningEvents.emit('activity', {
       type: 'eval',
@@ -569,7 +651,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
     if (parsed.shouldUpdate) {
       await updateKnowledge(parsed);
     }
@@ -602,7 +684,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
     if (parsed.isRule && parsed.rules.length > 0) {
       await updateKnowledge({ rules: parsed.rules });
       learningEvents.emit('activity', {
@@ -655,7 +737,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     const updates = {};
     if (parsed.ruleToAdd) updates.rules = [parsed.ruleToAdd];
@@ -793,7 +875,7 @@ Return ONLY valid JSON:
 
   try {
     const intentRaw = await callDeepSeekResponse(intentPrompt);
-    const intentParsed = JSON.parse(intentRaw.replace(/```json|```/g, '').trim());
+    const intentParsed = safeParseJSON(intentRaw);
     intent = intentParsed.intent || 'other';
     number = intentParsed.number || null;
   } catch {}
@@ -868,7 +950,7 @@ Return ONLY valid JSON:
 
   let parsed;
   try {
-    parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    parsed = safeParseJSON(raw);
   } catch {
     parsed = { action: 'respond_only', response: raw, confidence: 0.7 };
   }
@@ -923,7 +1005,7 @@ Return ONLY valid JSON:
 }`;
 
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     if (parsed.rule) await updateKnowledge({ rules: [parsed.rule] });
     await updateActionConfidence(actionType, trigger, true).catch(() => {});
@@ -959,7 +1041,7 @@ Return ONLY valid JSON:
 }`;
 
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     if (parsed.intent) {
       await updateKnowledge({
@@ -1082,7 +1164,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     let rawConf = parsed.confidence || 0;
     if (rawConf > 1) rawConf = rawConf / 100;
@@ -1226,7 +1308,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     if (parsed.shouldUpdate) {
       await updateKnowledge({
@@ -1371,7 +1453,7 @@ Return ONLY valid JSON:
 
   try {
     const response = await callDeepSeekLearn(prompt);
-    const parsed = JSON.parse(response.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(response);
 
     // knowledge ያዘምናል
     await updateKnowledge({
@@ -1525,7 +1607,7 @@ Return ONLY valid JSON:
     );
 
     const raw = completion.choices[0]?.message?.content || '';
-    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    const parsed = safeParseJSON(raw);
 
     if (parsed.shouldLearn && parsed.ruleToLearn) {
       await updateKnowledge({ rules: [parsed.ruleToLearn] });
