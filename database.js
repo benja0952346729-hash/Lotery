@@ -209,6 +209,12 @@ export async function initDB() {
     )
   `);
 
+  // context column ለ action_logs — ካለሌለ ጨምር
+  await query(`
+    ALTER TABLE action_logs
+    ADD COLUMN IF NOT EXISTS context TEXT
+  `).catch(() => {});
+
   await ensureTokenService('nvidia-deepseek');
   await ensureTokenService('groq');
 
