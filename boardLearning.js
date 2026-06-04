@@ -4,12 +4,10 @@
 // ============================================================
 
 import { query, readKnowledge, updateKnowledge, getBoardMessage } from './database.js';
-import { learningEvents } from './aiService.js';
+import { learningEvents, callDeepSeekAPI, callMultipleAPIsInParallel } from './aiService.js';
 import { getLearningDeepSeekKey, rotateResponseDeepSeekKey } from './keys.js';
-import { callDeepSeekAPI, callMultipleAPIsInParallel } from './aiService.js';
 
-const NVIDIA_API_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const DEEPSEEK_MODEL = 'deepseek-ai/deepseek-r1';
+const DEEPSEEK_MODEL = 'deepseek-ai/deepseek-v4-flash';
 
 // ============================================================
 // 📚 CONTEXT BUILDER — ሙሉ context ለ DeepSeek
@@ -26,12 +24,12 @@ async function buildBoardContext() {
       `),
       query(`
         SELECT text, is_admin, created_at
-        FROM messages
+        FROM history
         ORDER BY created_at DESC
         LIMIT 30
       `),
       query(`
-        SELECT action_type, context, result, created_at
+        SELECT action_type, trigger, reason, created_at
         FROM action_logs
         WHERE action_type LIKE '%board%'
            OR action_type LIKE '%register%'
@@ -58,7 +56,12 @@ async function buildBoardContext() {
     };
   } catch (err) {
     console.error('[BoardLearning] Context error:', err.message);
-    return {};
+    return {
+      knowledge: { boardTemplate: '', rules: [], adminStyle: {}, boardPatterns: [], privateRules: [] },
+      recentEdits: [],
+      recentHistory: [],
+      boardPatterns: [],
+    };
   }
 }
 
@@ -95,7 +98,7 @@ Details: ${JSON.stringify(details, null, 2)}
   "pattern": "ምን pattern አለ",
   "trigger": "ምን ሲሆን ይህ action ይሆናል",
   "lesson": "bot ቀጣይ ጊዜ ምን ማድረግ አለበት",
-  "confidence": 0.0-1.0,
+  "confidence": 0.0,
   "boardUpdate": "board ምን ይሆናል (optional)",
   "relatedPatterns": ["ሌሎች related patterns"]
 }
@@ -128,11 +131,12 @@ Details: ${JSON.stringify(details, null, 2)}
     await updateKnowledge({ boardPatterns: knowledge.boardPatterns });
 
     await query(`
-      INSERT INTO action_logs (action_type, context, result, created_at)
-      VALUES ($1, $2, $3, NOW())
+      INSERT INTO action_logs (action_type, trigger, reason, details, is_admin)
+      VALUES ($1, $2, $3, $4, TRUE)
     `, [
       `board_learning_${actionType}`,
-      JSON.stringify(details),
+      JSON.stringify(details).slice(0, 100),
+      learned.lesson || '',
       JSON.stringify(learned),
     ]).catch(() => {});
 
@@ -192,7 +196,7 @@ Admin ምን ማድረግ ፈልጓል? JSON ስጥ:
   "ruleIndex": null,
   "deleteTarget": "ምን rule ሰርዝ (delete ከሆነ)",
   "reply": "admin ላይ ምን ትመልሳለህ (Amharic — short)",
-  "confidence": 0.0-1.0
+  "confidence": 0.0
 }
 `;
 
@@ -347,7 +351,7 @@ ${JSON.stringify(context.recentHistory?.slice(0, 10), null, 2)}
   "pattern": "ምን pattern ተማርን",
   "trigger": "ምን user message ነው ይህን edit ያስከተለው",
   "lesson": "ቀጣይ ጊዜ bot ምን ያድርግ",
-  "confidence": 0.0-1.0
+  "confidence": 0.0
 }
 `;
 
@@ -435,15 +439,15 @@ User: @${username}
 Message: "${userMessage}"
 
 {
-  "shouldRespond": true/false,
+  "shouldRespond": true,
   "response": "ምን ትላለህ (Amharic)",
-  "shouldEditBoard": true/false,
+  "shouldEditBoard": false,
   "boardEdit": {
     "slotNumber": "number",
     "newEntry": "the full updated line as admin would write it",
     "editType": "registration|payment|removal"
   },
-  "confidence": 0.0-1.0,
+  "confidence": 0.0,
   "reasoning": "ለምን ይህን ወሰንክ"
 }
 `;
@@ -501,7 +505,7 @@ ${JSON.stringify(context.knowledge.boardPatterns?.slice(-30), null, 2)}
   "strongPatterns": ["ጠንካራ patterns"],
   "weakPatterns": ["ደካማ patterns"],
   "improvements": ["ምን ማሻሻል አለብን"],
-  "newConfidence": 0.0-1.0
+  "newConfidence": 0.0
 }
 `;
 
