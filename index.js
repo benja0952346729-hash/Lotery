@@ -616,13 +616,15 @@ app.post('/nvidia/v1/chat/completions', async (req, res) => {
   const apiKey = process.env.AXIOM_NVIDIA_KEY;
   if (!apiKey) return res.status(401).json({ error: 'AXIOM_NVIDIA_KEY not set' });
   try {
+    // Clean body — remove null bytes
+    const cleanBody = JSON.parse(JSON.stringify(req.body));
     const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify(cleanBody),
     });
     const text = await response.text();
     try {
