@@ -612,15 +612,15 @@ app.use(cors());
 // ─────────────────────────────────────────
 // NVIDIA NIM PROXY — CORS fix
 // ─────────────────────────────────────────
-app.post('/v1/chat/completions', async (req, res) => {
-  const apiKey = req.headers['authorization'];
-  if (!apiKey) return res.status(401).json({ error: 'No API key' });
+app.post('/nvidia/v1/chat/completions', async (req, res) => {
+  const apiKey = process.env.AXIOM_NVIDIA_KEY;
+  if (!apiKey) return res.status(401).json({ error: 'AXIOM_NVIDIA_KEY not set' });
   try {
     const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': apiKey,
+        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(req.body),
     });
