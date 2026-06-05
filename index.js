@@ -608,10 +608,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+app.use(express.json()); // ← ይህን ጨምር
 
-// ─────────────────────────────────────────
+// ─────────────────────────────────────
 // NVIDIA NIM PROXY — CORS fix
-// ─────────────────────────────────────────
+// ─────────────────────────────────────
 app.post('/nvidia/v1/chat/completions', async (req, res) => {
   const apiKey = process.env.AXIOM_NVIDIA_KEY;
   if (!apiKey) return res.status(401).json({ error: 'AXIOM_NVIDIA_KEY not set' });
