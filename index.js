@@ -624,8 +624,13 @@ app.post('/nvidia/v1/chat/completions', async (req, res) => {
       },
       body: JSON.stringify(req.body),
     });
-    const data = await response.json();
-    res.status(response.status).json(data);
+    const text = await response.text();
+    try {
+      const data = JSON.parse(text);
+      res.status(response.status).json(data);
+    } catch {
+      res.status(response.status).json({ error: text.slice(0, 500) });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
