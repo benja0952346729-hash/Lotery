@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
 import TelegramBot from 'node-telegram-bot-api';
 import cron from 'node-cron';
 import {
@@ -606,41 +605,6 @@ await initDB();
 // ============================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-app.use(express.json()); // ← ይህን ጨምር
-
-// ─────────────────────────────────────
-// NVIDIA NIM PROXY — CORS fix
-// ─────────────────────────────────────
-app.post('/nvidia/v1/chat/completions', async (req, res) => {
-  const apiKey = process.env.AXIOM_NVIDIA_KEY;
-  if (!apiKey) return res.status(401).json({ error: 'AXIOM_NVIDIA_KEY not set' });
-  try {
-    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(req.body),
-    });
-    const text = await response.text();
-    console.log('[NVIDIA PROXY]', text.slice(0, 500));
-    try {
-      const data = JSON.parse(text);
-      res.status(response.status).json(data);
-    } catch {
-      res.status(response.status).json({ error: text.slice(0, 500) });
-    }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.get('/', (req, res) => {
   res.send(`
