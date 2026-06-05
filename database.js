@@ -210,20 +210,6 @@ export async function initDB() {
     )
   `);
 
-  // ── አዲስ: user_styles — users ምን style እንዳላቸው ለመማር ──
-  await query(`
-    CREATE TABLE IF NOT EXISTS user_styles (
-      id SERIAL PRIMARY KEY,
-      user_id BIGINT UNIQUE NOT NULL,
-      username TEXT,
-      sample_message TEXT,
-      intent TEXT,
-      message_count INTEGER DEFAULT 1,
-      seen_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-
-  // ── user_styles — ካልተፈጠረ ፍጠር ──
   await query(`
     CREATE TABLE IF NOT EXISTS user_styles (
       id SERIAL PRIMARY KEY,
@@ -239,6 +225,23 @@ export async function initDB() {
   // ── existing columns fix ──
   await query(`
     ALTER TABLE action_logs ADD COLUMN IF NOT EXISTS context TEXT
+  `).catch(() => {});
+
+  // ── history table missing columns fix ──
+  await query(`
+    ALTER TABLE history ADD COLUMN IF NOT EXISTS last_name TEXT
+  `).catch(() => {});
+
+  await query(`
+    ALTER TABLE history ADD COLUMN IF NOT EXISTS first_name TEXT
+  `).catch(() => {});
+
+  await query(`
+    ALTER TABLE history ADD COLUMN IF NOT EXISTS username TEXT
+  `).catch(() => {});
+
+  await query(`
+    ALTER TABLE history ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE
   `).catch(() => {});
 
   await ensureTokenService('nvidia-deepseek');
